@@ -3,14 +3,17 @@ import os
 import tempfile
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from base_api.models import Media, MediaSource
+
 import video_downloader.__main__ as main
 import debug_main
 from video_downloader.application.download_manager import DownloadManager
+from video_downloader.application.provider_session import ProviderSession
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
 from video_downloader.application.download_service import run_download_job
 from video_downloader.ui.main_window import MainWindow
@@ -107,7 +110,7 @@ async def test_async_method_boundaries(tmp_path):
     task = manager.start_download(job)
     assert asyncio.isfuture(task) or isinstance(task, asyncio.Task)
     
-    # wait for fast fail due to invalid URL
+    # Fails fast and without network: the bare manager has no provider wiring.
     await task
     
     # cancel_download is async
@@ -120,33 +123,62 @@ async def test_async_method_boundaries(tmp_path):
 
 # 7. Fake Complete Download Integration
 
+def _media(url: str, title: str = "test_vid") -> Media:
+    return Media(
+        provider="fake",
+        original_url=url,
+        title=title,
+        sources=[MediaSource(url="https://cdn.test/stream.m3u8", source_type="HLS")],
+    )
+
+
+class _FakeRegistry:
+    def __init__(self, media: Media | None = None, error: Exception | None = None):
+        self.media = media
+        self.error = error
+
+    async def resolve(self, url):
+        if self.error is not None:
+            raise self.error
+        return self.media or _media(url)
+
+    async def close(self):
+        return None
+
+
+class _FakeCore:
+    """A BaseCore stand-in driven by the DownloadConfigHLS it receives."""
+
+    def __init__(self, behaviour):
+        self.behaviour = behaviour
+
+    async def download(self, configuration):
+        return await self.behaviour(configuration)
+
+    async def close(self):
+        return None
+
+
 @pytest.mark.asyncio
 async def test_fake_complete_download():
     with tempfile.TemporaryDirectory() as td:
-        class FakeVideo:
-            title = "test_vid"
-            async def download(self, **kwargs):
-                cb = kwargs["callback"]
-                stop = kwargs["stop_event"]
-                for i in range(1, 5):
-                    if stop.is_set():
-                        return type("Result", (), {"status": "cancelled"})()
-                    cb(i, 4)
-                return type("Result", (), {"status": "completed", "output_file": "test.mp4"})()
+        async def behaviour(configuration):
+            for i in range(1, 5):
+                if configuration.stop_event.is_set():
+                    return type("Result", (), {"status": "cancelled"})()
+                configuration.callback(i, 4)
+            return type("Result", (), {"status": "completed", "output_file": "test.mp4"})()
 
-        class FakeClient:
-            def __init__(self):
-                self.core = AsyncMock()
-            async def get_video(self, url):
-                return FakeVideo()
+        def factory():
+            return ProviderSession(registry=_FakeRegistry(), core=_FakeCore(behaviour))
 
         async def runner(job):
-            return await run_download_job(job, client_factory=FakeClient)
-            
+            return await run_download_job(job, session_factory=factory)
+
         manager = DownloadManager(output_dir=td, job_runner=runner)
         job = manager.add_download("http://ok")
         await job.asyncio_task
-        
+
         assert job.state == LifecycleState.COMPLETED
         assert job.progress == 100.0
         assert not job.state_file.exists()
@@ -156,15 +188,18 @@ async def test_fake_complete_download():
 @pytest.mark.asyncio
 async def test_fake_failed_metadata():
     with tempfile.TemporaryDirectory() as td:
-        class FakeClientFail:
-            def __init__(self):
-                self.core = AsyncMock()
-            async def get_video(self, url):
-                raise ConnectionError("No network")
-                
+        async def never(configuration):  # pragma: no cover - must not run
+            raise AssertionError("resolution failed; nothing may be downloaded")
+
+        def factory():
+            return ProviderSession(
+                registry=_FakeRegistry(error=ConnectionError("No network")),
+                core=_FakeCore(never),
+            )
+
         async def runner(job):
-            return await run_download_job(job, client_factory=FakeClientFail)
-            
+            return await run_download_job(job, session_factory=factory)
+
         manager = DownloadManager(output_dir=td, job_runner=runner)
         job = manager.add_download("http://fail")
         await job.asyncio_task
@@ -174,22 +209,17 @@ async def test_fake_failed_metadata():
 @pytest.mark.asyncio
 async def test_fake_cancel_download():
     with tempfile.TemporaryDirectory() as td:
-        class FakeVideoBlock:
-            async def download(self, **kwargs):
-                stop = kwargs["stop_event"]
-                while not stop.is_set():
-                    await asyncio.sleep(0.01)
-                return type("Result", (), {"status": "cancelled"})()
-                
-        class FakeClientBlock:
-            def __init__(self):
-                self.core = AsyncMock()
-            async def get_video(self, url):
-                return FakeVideoBlock()
-                
+        async def behaviour(configuration):
+            while not configuration.stop_event.is_set():
+                await asyncio.sleep(0.01)
+            return type("Result", (), {"status": "cancelled"})()
+
+        def factory():
+            return ProviderSession(registry=_FakeRegistry(), core=_FakeCore(behaviour))
+
         async def runner(job):
-            return await run_download_job(job, client_factory=FakeClientBlock)
-            
+            return await run_download_job(job, session_factory=factory)
+
         manager = DownloadManager(output_dir=td, job_runner=runner)
         job = manager.add_download("http://cancel")
         await asyncio.sleep(0.05)

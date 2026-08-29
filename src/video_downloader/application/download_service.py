@@ -7,12 +7,28 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from base_api.models import Media, MediaSource
+from base_api.modules.config import DownloadConfigHLS
+from base_api.modules.errors import (
+    AmbiguousProviderError,
+    UnsupportedProtocolError,
+    UnsupportedURLError,
+)
 from base_api.modules.static_functions import strip_title
-from xhamster_api import Client
 
+from video_downloader.application.provider_session import (
+    ProviderNotConfiguredError,
+    ProviderSession,
+)
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
 
 logger = logging.getLogger(__name__)
+
+#: Failures of provider *selection*, raised by the registry before any provider
+#: did any work. Kept as their own tuple so they stay distinguishable from
+#: network, extraction, segment, remux and filesystem errors - all of which mean
+#: a provider was found and something later went wrong.
+PROVIDER_SELECTION_ERRORS = (UnsupportedURLError, AmbiguousProviderError)
 
 
 def _result_path(result: Any) -> Path | None:
@@ -31,6 +47,24 @@ def _ensure_async_stop_event(job: DownloadJob) -> None:
         raise TypeError(
             "DownloadJob.stop_event must support async wait(); use asyncio.Event for loop-safe cancellation."
         )
+
+
+def _hls_source(media: Media) -> MediaSource:
+    """Pick the source the HLS engine can actually download.
+
+    The same rule and the same error type the provider used to apply inside its
+    own `download()`, so a media without a usable stream still fails as
+    UnsupportedProtocolError rather than as something new.
+    """
+    source = next(
+        (s for s in getattr(media, "sources", ()) if getattr(s, "source_type", None) == "HLS"),
+        None,
+    )
+    if source is None:
+        raise UnsupportedProtocolError(
+            f"No HLS source available for {getattr(media, 'original_url', '')}"
+        )
+    return source
 
 
 def _create_progress_callback(job: DownloadJob) -> Callable[[int, int], None]:
@@ -93,45 +127,62 @@ def _handle_download_result(job: DownloadJob, result: Any) -> None:
 
 async def run_download_job(
     job: DownloadJob,
-    client_factory: Callable[[], Client] = Client,
+    session_factory: Callable[[], ProviderSession] | None = None,
     remux: bool = True,
 ) -> DownloadJob:
+    """Run one job: registry -> Media -> HLS source -> BaseCore -> file.
+
+    Nothing here knows which website the URL belongs to. `session_factory` comes
+    from the composition root and supplies both halves of a job's provider
+    resources; this function owns their shutdown, on every exit path.
+    """
     logger.info("[JOB %s] Starting download task (Thread: %s)", job.id, threading.current_thread().name)
-    client: Client | None = None
+    session: ProviderSession | None = None
     job.output_dir.mkdir(parents=True, exist_ok=True)
     job.state_file.parent.mkdir(parents=True, exist_ok=True)
     try:
+        if session_factory is None:
+            raise ProviderNotConfiguredError(
+                "Kein Provider konfiguriert. Der DownloadManager braucht einen "
+                "job_runner mit Provider-Session (siehe bootstrap)."
+            )
+
         job.transition(LifecycleState.CONNECTING)
-        logger.debug("[JOB %s] Creating client (Thread: %s)", job.id, threading.current_thread().name)
-        client = client_factory()
+        logger.debug("[JOB %s] Creating provider session (Thread: %s)", job.id, threading.current_thread().name)
+        session = session_factory()
 
         job.transition(LifecycleState.FETCHING_METADATA)
-        logger.info("[JOB %s] get_video start URL: %s", job.id, job.url)
-        video = await client.get_video(job.url)
-        logger.info("[JOB %s] get_video finished", job.id)
+        logger.info("[JOB %s] resolve start URL: %s", job.id, job.url)
+        media = await session.registry.resolve(job.url)
+        logger.info("[JOB %s] resolve finished, provider=%s", job.id, getattr(media, "provider", "unknown"))
 
-        job.title = getattr(video, "title", None) or job.url
+        job.title = getattr(media, "title", None) or job.url
         # job.title stays the display title the UI shows. Only the filesystem
-        # component is sanitized - and through the very same function the provider
-        # uses to build the real filename, so the path we record here and the file
-        # that actually lands on disk cannot drift apart.
+        # component is sanitized - through the same function the provider used to
+        # apply inside its own download(). The sanitized path is now handed to the
+        # engine verbatim, so the path we record and the file that lands on disk
+        # are one string rather than two derivations that have to agree.
         job.output_file = job.output_dir / f"{strip_title(job.title)}.mp4"
+        source = _hls_source(media)
         job.transition(LifecycleState.DOWNLOADING)
         _ensure_async_stop_event(job)
 
         callback = _create_progress_callback(job)
 
         real_remux = job.remux if job.remux is not None else remux
-        logger.info("[JOB %s] video.download start (remux=%s)", job.id, real_remux)
-        result = await video.download(
-            quality=job.quality,
-            path=str(job.output_dir),
-            callback=callback,
-            remux=real_remux,
-            stop_event=job.stop_event,
-            segment_state_path=str(job.state_file),
+        logger.info("[JOB %s] core.download start (remux=%s)", job.id, real_remux)
+        result = await session.core.download(
+            DownloadConfigHLS(
+                quality=job.quality,
+                path=str(job.output_file),
+                callback=callback,
+                stop_event=job.stop_event,
+                media_source=source,
+                remux=real_remux,
+                segment_state_path=str(job.state_file),
+            )
         )
-        logger.info("[JOB %s] video.download finished. Result: %s", job.id, result)
+        logger.info("[JOB %s] core.download finished. Result: %s", job.id, result)
 
         _handle_download_result(job, result)
 
@@ -140,14 +191,21 @@ async def run_download_job(
         job.request_stop()
         job.transition(LifecycleState.CANCELLED)
         raise
+    except PROVIDER_SELECTION_ERRORS as error:
+        # No provider ran, so nothing was fetched and nothing was written. Logged
+        # apart from the generic failure below so that "this link is not ours"
+        # never reads like a network or extraction problem.
+        job.error = f"{type(error).__name__}: {error}"
+        job.transition(LifecycleState.FAILED)
+        logger.warning("[JOB %s] Provider selection failed for %s: %s", job.id, job.url, error)
     except Exception as error:
         job.error = f"{type(error).__name__}: {error}"
         job.transition(LifecycleState.FAILED)
         logger.exception("[JOB %s] Download failed", job.id)
     finally:
-        if client is not None:
-            logger.info("[JOB %s] client.close start", job.id)
-            await client.core.close()
-            logger.info("[JOB %s] client.close finish", job.id)
+        if session is not None:
+            logger.info("[JOB %s] provider session close start", job.id)
+            await session.close()
+            logger.info("[JOB %s] provider session close finish", job.id)
         logger.info("[JOB %s] Job ended with state %s", job.id, job.state.value)
     return job

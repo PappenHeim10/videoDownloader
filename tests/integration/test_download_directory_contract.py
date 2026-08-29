@@ -15,10 +15,10 @@ from PySide6.QtWidgets import QApplication
 
 from base_api.base import BaseCore
 from base_api.models import Media, MediaSource
-from xhamster_api.xhamster_api import Video
 
 from video_downloader.application.download_manager import DownloadManager
 from video_downloader.application.download_service import run_download_job
+from video_downloader.application.provider_session import ProviderSession
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
 from video_downloader.infrastructure.paths import HOME_ENV_VAR
 from video_downloader.infrastructure.settings import AppSettings
@@ -219,20 +219,19 @@ async def test_configured_directory_carries_through_to_the_completed_file(settin
     core.close = AsyncMock()
 
     raw_title = "Why: does this work?"
-    video = Video(url=PROVIDER_URL, core=core)
-    video.__dict__["title"] = raw_title
     media = Media(provider="xHamster", original_url=PROVIDER_URL, title=raw_title)
     media.sources = [MediaSource(url="https://cdn.example/x.m3u8", source_type="HLS")]
-    video.to_media = MagicMock(return_value=media)
 
-    client = MagicMock()
-    client.core = core
-    client.get_video = AsyncMock(return_value=video)
+    registry = MagicMock()
+    registry.resolve = AsyncMock(return_value=media)
+    registry.close = AsyncMock()
 
     job = DownloadJob(
         url=PROVIDER_URL, quality="best", output_dir=settings.get_download_directory()
     )
-    await run_download_job(job, client_factory=lambda: client)
+    await run_download_job(
+        job, session_factory=lambda: ProviderSession(registry=registry, core=core)
+    )
 
     assert job.state == LifecycleState.COMPLETED
     assert job.output_file is not None                       # B1 stays fixed

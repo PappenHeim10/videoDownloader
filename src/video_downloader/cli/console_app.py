@@ -44,7 +44,12 @@ class ConsoleApp:
             print("FEHLER: Keine Video-URL angegeben.", flush=True)
             return 2
 
-        self.manager = DownloadManager(directory)
+        # The same providers the GUI uses, from the same composition root.
+        # Imported here rather than at module level so that parsing arguments and
+        # printing the usage errors above never pulls Qt in.
+        from video_downloader.bootstrap import create_job_runner
+
+        self.manager = DownloadManager(directory, job_runner=create_job_runner())
         job = self.manager.add_download(video_url, self.args.quality, remux=not self.args.no_remux)
         loop = asyncio.get_running_loop()
         try:
@@ -60,7 +65,7 @@ class ConsoleApp:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="xHamster HLS console downloader")
+    parser = argparse.ArgumentParser(description="HLS console downloader")
     parser.add_argument("url", nargs="?", help="Video-URL; ohne Angabe interaktiv")
     parser.add_argument(
         "-o",
