@@ -18,6 +18,11 @@ from video_downloader.ui.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
 
+#: Emitted on stdout by `--smoke-test` only. Reaching this line means the frozen
+#: application imported video_downloader, imported bootstrap, and constructed its
+#: components - which is the thing a build needs proven.
+SMOKE_MARKER = "VideoDownloader smoke OK"
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -126,6 +131,10 @@ def run_application(*, debug: bool = False, smoke_test: bool = False) -> int:
 
     if smoke_test:
         logger.info("Smoke test passed: Components constructed successfully")
+        # Printed only in smoke mode, never during a normal start. The build reads
+        # it to prove it exercised *this* artifact: an exit code alone cannot tell
+        # a working executable from a stale one lying in another directory.
+        print(SMOKE_MARKER, flush=True)
         return 0
         
     loop = QEventLoop(application)
