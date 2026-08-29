@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from base_api.modules.static_functions import strip_title
 from xhamster_api import Client
 
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
@@ -100,7 +101,11 @@ async def run_download_job(
         logger.info("[JOB %s] get_video finished", job.id)
 
         job.title = getattr(video, "title", None) or job.url
-        job.output_file = job.output_dir / f"{job.title}.mp4"
+        # job.title stays the display title the UI shows. Only the filesystem
+        # component is sanitized - and through the very same function the provider
+        # uses to build the real filename, so the path we record here and the file
+        # that actually lands on disk cannot drift apart.
+        job.output_file = job.output_dir / f"{strip_title(job.title)}.mp4"
         job.transition(LifecycleState.DOWNLOADING)
         _ensure_async_stop_event(job)
 
