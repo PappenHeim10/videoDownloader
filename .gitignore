@@ -1,0 +1,22 @@
+# runtime output
+logs/
+.state/
+downloads/
+downloads_test/
+runtime/
+*.log
+
+# build artefacts
+build/
+dist/
+build_*
+__pycache__/
+*.egg-info/
+
+# environments / caches
+.venv/
+.pytest_cache/
+
+# generated PyInstaller specs; the maintained ones under packaging/ are tracked
+*.spec
+!packaging/pyinstaller/*.spec

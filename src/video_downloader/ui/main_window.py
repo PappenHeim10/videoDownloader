@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import asyncio
+
+from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QPushButton, QProgressBar, QVBoxLayout, QWidget,
+)
+
+from video_downloader.domain.download_job import DownloadJob, LifecycleState
+from video_downloader.application.download_manager import DownloadManager
+
+
+class JobBridge(QObject):
+    changed = Signal(object)
+
+
+class DownloadItem(QFrame):
+    def __init__(self, job: DownloadJob, manager: DownloadManager, delete_callback, parent=None):
+        super().__init__(parent)
+        self.job = job
+        self.manager = manager
+        self._closing = False
+        self.bridge = JobBridge(self)
+        self.bridge.changed.connect(self.refresh)
+        job.on_change = self.bridge.changed.emit
+        layout = QVBoxLayout(self)
+        header = QHBoxLayout()
+        self.title = QLabel()
+        remove = QPushButton("X")
+        remove.setFixedWidth(32)
+        remove.clicked.connect(lambda: asyncio.create_task(delete_callback(job)))
+        header.addWidget(self.title)
+        header.addWidget(remove)
+        layout.addLayout(header)
+        self.status = QLabel()
+        layout.addWidget(self.status)
+        self.progress = QProgressBar()
+        layout.addWidget(self.progress)
+        self.refresh(job)
+
+    def mouseReleaseEvent(self, event):
+        if self.job.state == LifecycleState.COMPLETED and self.job.output_file:
+            if self.job.output_file.exists():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.job.output_file)))
+            else:
+                self.status.setText("Datei nicht gefunden")
+        super().mouseReleaseEvent(event)
+
+    def refresh(self, job: DownloadJob):
+        self.title.setText(job.title or job.url or "Vorhandene Datei")
+        details = f"{job.downloaded_segments} / {job.total_segments} Segmente" if job.total_segments else ""
+        self.status.setText(f"{job.state.value} {details}".strip())
+        self.progress.setValue(round(job.progress))
+        self.status.setToolTip(job.error or "")
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, manager: DownloadManager):
+        super().__init__()
+        self.manager = manager
+        self._closing = False
+        self._shutdown_done = False
+        self.setWindowTitle("Video Downloader")
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        row = QHBoxLayout()
+        self.url = QLineEdit()
+        self.url.setPlaceholderText("Video URL")
+        self.quality = QLineEdit("best")
+        download = QPushButton("Download")
+        download.clicked.connect(self.add_download)
+        row.addWidget(self.url, 1)
+        row.addWidget(self.quality)
+        row.addWidget(download)
+        layout.addLayout(row)
+        self.list = QListWidget()
+        layout.addWidget(self.list)
+        for job in manager.get_jobs():
+            self.add_item(job)
+
+    def add_download(self):
+        url = self.url.text().strip()
+        if url:
+            self.add_item(self.manager.add_download(url, self.quality.text().strip() or "best"))
+            self.url.clear()
+
+    def add_item(self, job: DownloadJob):
+        item = QListWidgetItem(self.list)
+        widget = DownloadItem(job, self.manager, self.delete_item)
+        item.setSizeHint(widget.sizeHint())
+        self.list.setItemWidget(item, widget)
+
+    async def delete_item(self, job: DownloadJob):
+        await self.manager.delete_download(job)
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            widget = self.list.itemWidget(item)
+            if widget is not None and widget.job is job:
+                self.list.takeItem(index)
+                break
+
+    def closeEvent(self, event):
+        if self._shutdown_done:
+            event.accept()
+            return
+        if self._closing:
+            event.ignore()
+            return
+        event.ignore()
+        self._closing = True
+        asyncio.create_task(self._shutdown())
+
+    async def _shutdown(self):
+        await self.manager.shutdown()
+        self._shutdown_done = True
+        self.close()

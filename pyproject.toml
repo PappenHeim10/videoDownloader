@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-downloader"
+version = "0.1.0"
+description = "Asynchronous PySide6/qasync desktop downloader for HLS video streams"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.7",
+    "qasync>=0.27",
+    # Pinned to known-green fork commits. Do not switch these to branch refs:
+    # the point of the pin is a reproducible dependency state.
+    # [hls] pulls m3u8 + av, which the segment download and the TS->MP4 remux need.
+    "eaf_base_api[hls] @ git+https://github.com/PappenHeim10/eaf_base_api.git@d6164a7",
+    "xhamster_api @ git+https://github.com/PappenHeim10/unofficial-api-for-xhamster.git@e0f5977",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-qt",
+    "pytest-timeout",
+    "PyInstaller>=6.10",
+]
+
+[project.scripts]
+video-downloader = "video_downloader.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+timeout = 30
