@@ -26,14 +26,16 @@ src/video_downloader/__main__.py / debug_main.py
         |
         +--> run_download_job (Isoliert in download_service.py)
                |
-               +--> xhamster_api.Client
+               +--> ProviderSession (pro Job, aus bootstrap.create_provider_session)
                       |
-                      +--> get_video()
-                      +--> Video.download()
-                             |
-                             +--> base_api.BaseCore (HTTP-Requests, HLS-Segmente)
-                                    +--> paralleler Download
-                                    +--> Stop-Event via asyncio.to_thread
+                      +--> ProviderRegistry.resolve(url) -> Media (+ MediaSource.headers)
+                      |      +--> XHamsterAdapter   (xhamster.com/.desi, eigener Extraktions-Client)
+                      |      +--> DirectMediaAdapter (direkte .m3u8-URLs, keine Header)
+                      |
+                      +--> base_api.BaseCore.download(DownloadConfigHLS)   [provider-sauberer Core]
+                             +--> Manifest-/Playlist-/Segment-Requests mit MediaSource.headers
+                             +--> paralleler Segment-Download
+                             +--> Stop-Event, Resume-State, Remux
 ```
 
 ### Startschicht: `__main__.py` und `debug_main.py`
@@ -48,9 +50,14 @@ Der `DownloadManager` orchestriert alle aktiven `DownloadJob`-Instanzen. Ein Job
 
 `MainWindow` nutzt PySide6. Es laedt regelmässig den Status aus den `DownloadJob`s und aktualisiert die ProgressBar und Label.
 
-### Adapter-Schicht: `packages/xhamster-api`
+### Provider-Schicht: `ProviderRegistry` und Adapter
 
-Der `Client` liefert ein `Video`-Objekt. Das `Video`-Objekt laedt die HTML-Seite und extrahiert daraus die M3U8-URL.
+Die Registry waehlt anhand von `supports(url)` genau einen Provider aus und liefert dessen `resolve(url)` als provider-neutrales `Media` mit `MediaSource`-Liste zurueck. Passt keiner, kommt `UnsupportedURLError`; passen mehrere, `AmbiguousProviderError`. Registriert sind `XHamsterAdapter` (laedt die HTML-Seite und extrahiert die M3U8-URL) und `DirectMediaAdapter` (rein URL-basiert, ohne Netzwerk).
+
+Zwei Transport-Kontexte sind bewusst getrennt:
+
+* **Provider-Session (Extraktion)**: Jeder Adapter besitzt seinen eigenen Client. Was dessen Session an Zustand ansammelt - der xHamster-`Referer`, Cookies aus dem Seitenabruf - bleibt dort und endet mit `registry.close()`.
+* **`MediaSource.headers` (Medien-Download)**: Was die Medien-Requests einer Quelle mitschicken muessen, steht an der Quelle selbst (z. B. `Referer` fuer Hotlink-Schutz) und wird von `BaseCore` pro Request angewendet - auf Master-Manifest, Media-Playlist und jedes Segment inkl. Retries. Der Download-Core des Jobs bleibt provider-sauber; kein Adapter schreibt je auf seine Session. Praezedenz: Quell-Header schlagen Session-Header fuer genau diesen Request (case-insensitiv); die Session selbst wird nie veraendert. Eine direkte `.m3u8`-Quelle erbt dadurch keinen fremden `Referer` mehr.
 
 ### Download-Schicht: `packages/base-api`
 
@@ -77,5 +84,6 @@ Ein GUI-Crash wirft eine Exception, die vom qasync Exception Handler oder dem al
 ## Wartungsregeln
 
 1. **Kein blockierender Code im Main-Thread**: `threading.Event().wait()` oder Netzwerk-Requests duerfen niemals direkt im QEventLoop ausgefuehrt werden (nutze `asyncio.to_thread` oder `aiohttp`).
-2. **Client Isolierung**: Fuer jeden `DownloadJob` wird in `run_download_job` eine frische `Client`-Instanz und ein eigener `BaseCore` erzeugt, um state/sessions (wie `core.session` oder cookies) pro Download zu trennen.
-3. **Abbruch**: Ueber `job.cancel()` wird das `stop_event` gesetzt. Das HLS-Backend beendet sich geordnet.
+2. **Provider-Isolierung**: Fuer jeden `DownloadJob` erzeugt die injizierte Factory (`bootstrap.create_provider_session`) eine eigene `ProviderSession` - eigene Registry mit adapter-eigenen Extraktions-Clients plus ein provider-sauberer Download-`BaseCore` - und `run_download_job` schliesst sie im `finally`, auch bei Fehler und Abbruch. Ein gemeinsam genutztes Registry wuerde entweder pro Job die Session anderer laufender Jobs schliessen oder die bisherige Isolation aufgeben. Medien-Transport-Header gehoeren auf `MediaSource.headers`, nie auf die Session des Download-Cores.
+3. **Neue Website**: nur in `bootstrap.create_provider_session` registrieren. Der Download-Workflow kennt keine Website, sondern nur `Media`/`MediaSource`.
+4. **Abbruch**: Ueber `job.cancel()` wird das `stop_event` gesetzt. Das HLS-Backend beendet sich geordnet.

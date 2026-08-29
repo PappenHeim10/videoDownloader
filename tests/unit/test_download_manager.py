@@ -3,8 +3,66 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from base_api.models import Media, MediaSource
+
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
 from video_downloader.application.download_manager import DownloadManager
+from video_downloader.application.provider_session import ProviderSession
+
+
+class FakeCore:
+    """Stands in for BaseCore: records what it was asked to download."""
+
+    def __init__(self, result=True, error: Exception | None = None):
+        self.configurations = []
+        self.result = result
+        self.error = error
+        self.close_calls = 0
+
+    async def download(self, configuration):
+        self.configurations.append(configuration)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def close(self):
+        self.close_calls += 1
+
+
+class FakeRegistry:
+    """Stands in for ProviderRegistry: one media, or one selection failure."""
+
+    def __init__(self, media: Media | None = None, error: Exception | None = None):
+        self.media = media
+        self.error = error
+        self.resolved: list[str] = []
+        self.close_calls = 0
+
+    async def resolve(self, url: str) -> Media:
+        self.resolved.append(url)
+        if self.error is not None:
+            raise self.error
+        assert self.media is not None
+        return self.media
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+def fake_media(url: str = "a", title: str = "test") -> Media:
+    return Media(
+        provider="fake",
+        original_url=url,
+        title=title,
+        sources=[MediaSource(url="https://cdn.test/stream.m3u8", source_type="HLS")],
+    )
+
+
+def fake_session(*, media: Media | None = None, resolve_error: Exception | None = None,
+                 download_error: Exception | None = None, result=True):
+    registry = FakeRegistry(media=media or fake_media(), error=resolve_error)
+    core = FakeCore(result=result, error=download_error)
+    return ProviderSession(registry=registry, core=core), core
 
 
 class DownloadManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -56,33 +114,18 @@ class DownloadManagerTests(unittest.IsolatedAsyncioTestCase):
                 def wait(self):
                     return True
 
-            class Core:
-                async def close(self):
-                    return None
-
-            class Video:
-                title = "test"
-
-                async def download(self, **kwargs):
-                    return True
-
-            class Client:
-                def __init__(self):
-                    self.core = Core()
-
-                async def get_video(self, url):
-                    return Video()
-
             from video_downloader.application.download_service import run_download_job
 
             job = DownloadJob(url="a", quality="best", output_dir=Path(directory))
             job.stop_event = BlockingStopEvent()  # type: ignore[assignment]
 
-            await run_download_job(job, client_factory=Client)
+            session, core = fake_session()
+            await run_download_job(job, session_factory=lambda: session)
 
             self.assertEqual(job.state, LifecycleState.FAILED)
             self.assertIsNotNone(job.error)
             self.assertIn("async wait", job.error)
+            self.assertEqual(core.configurations, [])  # nothing was downloaded
 
     async def test_cancel_isolation_and_delete(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -102,39 +145,28 @@ class DownloadManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(job_a, manager.get_jobs())
             await manager.shutdown()
 
-    async def test_failure_isolation_and_client_cleanup(self):
+    async def test_failure_isolation_and_provider_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
-            clients = []
-
-            class Core:
-                def __init__(self):
-                    self.closed = False
-
-                async def close(self):
-                    self.closed = True
-
-            class Video:
-                async def download(self, **kwargs):
-                    raise RuntimeError("broken")
-
-            class Client:
-                def __init__(self):
-                    self.core = Core()
-                    clients.append(self)
-
-                async def get_video(self, url):
-                    return Video()
+            sessions = []
 
             from video_downloader.application.download_service import run_download_job
 
+            def factory():
+                session, core = fake_session(download_error=RuntimeError("broken"))
+                sessions.append((session, core))
+                return session
+
             async def runner(job):
-                return await run_download_job(job, client_factory=Client)
+                return await run_download_job(job, session_factory=factory)
 
             manager = DownloadManager(directory, job_runner=runner)
             job = manager.add_download("broken")
             await job.asyncio_task
             self.assertEqual(job.state, LifecycleState.FAILED)
-            self.assertTrue(clients[0].core.closed)
+            # A failing download still releases the job's provider resources.
+            session, core = sessions[0]
+            self.assertEqual(core.close_calls, 1)
+            self.assertEqual(session.registry.close_calls, 1)
             await manager.shutdown()
 
 

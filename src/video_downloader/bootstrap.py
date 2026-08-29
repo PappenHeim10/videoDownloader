@@ -6,12 +6,20 @@ import platform
 import sys
 import threading
 import time
+from functools import partial
 from pathlib import Path
+from typing import Callable
 
+from base_api import BaseCore, DirectMediaAdapter, ProviderRegistry
+from base_api.modules.config import RuntimeConfig
 from PySide6.QtWidgets import QApplication
 from qasync import QEventLoop
+from xhamster_api import XHamsterAdapter
 
 from video_downloader.application.download_manager import DownloadManager
+from video_downloader.application.download_service import run_download_job
+from video_downloader.application.provider_session import ProviderSession
+from video_downloader.domain.download_job import DownloadJob
 from video_downloader.infrastructure.paths import AppPaths
 from video_downloader.infrastructure.settings import AppSettings
 from video_downloader.ui.main_window import MainWindow
@@ -36,6 +44,52 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def create_provider_session() -> ProviderSession:
+    """Build the production registry, scoped to one job.
+
+    This is the only place that knows which websites the application supports.
+    Adding one means registering it here; the download workflow does not change.
+
+    Why per job and not one shared registry for the whole application:
+    `XHamsterAdapter` owns a `Client` -> `BaseCore` -> `curl_cffi.AsyncSession`,
+    and closing an adapter is exactly what `ProviderRegistry.close()` does. A
+    single shared registry would leave two bad options - close it after every
+    job, which pulls the session out from under every other running job, or
+    never close it per job, which makes concurrent downloads share one session
+    where today each job has its own. Per-job isolation is the stronger
+    guarantee, so it wins.
+
+    Two transport contexts, kept deliberately apart:
+
+    * Extraction: each adapter owns the client it scrapes with. Whatever that
+      session accumulates - the xHamster `Referer` the `Client` installs, the
+      cookies the site sets during the page fetch - stays confined to it and
+      dies with `registry.close()`.
+    * Download: `session.core` is the engine the job downloads on, and it is
+      provider-clean by construction - no adapter ever touches its session.
+      What a media request must carry travels on `MediaSource.headers` and is
+      applied per request by `BaseCore`, so an xHamster source brings its
+      `Referer` along and a direct `.m3u8` source stays header-free instead of
+      inheriting one from a neighbour.
+    """
+    core = BaseCore(RuntimeConfig())
+    registry = ProviderRegistry()
+    registry.register(XHamsterAdapter())
+    registry.register(DirectMediaAdapter())
+    return ProviderSession(registry=registry, core=core)
+
+
+def create_job_runner(
+    session_factory: Callable[[], ProviderSession] = create_provider_session,
+) -> Callable[[DownloadJob], object]:
+    """Bind the providers into the job runner.
+
+    The manager stays provider-neutral: it is handed something it can call with
+    a job, and never learns that providers exist.
+    """
+    return partial(run_download_job, session_factory=session_factory)
 
 class WatchdogThread(threading.Thread):
     def __init__(self, loop, timeout=2.0):
@@ -140,7 +194,9 @@ def run_application(*, debug: bool = False, smoke_test: bool = False) -> int:
     # be absent on first run - the window asks for one when a download starts.
     settings = AppSettings()
     manager = DownloadManager(
-        output_dir=settings.get_download_directory(), max_concurrent_downloads=3
+        output_dir=settings.get_download_directory(),
+        max_concurrent_downloads=3,
+        job_runner=create_job_runner(),
     )
     window = MainWindow(manager, settings)
 
