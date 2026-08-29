@@ -12,6 +12,8 @@ from PySide6.QtWidgets import QApplication
 from qasync import QEventLoop
 
 from video_downloader.application.download_manager import DownloadManager
+from video_downloader.infrastructure.paths import AppPaths
+from video_downloader.infrastructure.settings import AppSettings
 from video_downloader.ui.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -57,20 +59,21 @@ def handle_asyncio_exception(loop, context):
     msg = context.get("exception", context["message"])
     logger.critical(f"Uncaught asyncio exception: {msg}", exc_info=context.get("exception"))
 
-def configure_logging(debug: bool):
+def configure_logging(debug: bool, paths: AppPaths | None = None):
     handlers = []
-    Path("runtime/downloads").mkdir(parents=True, exist_ok=True)
-    Path("runtime/logs").mkdir(parents=True, exist_ok=True)
-    
+    # Per-user location, never the working directory: the same executable started
+    # from Explorer, a shortcut or a terminal must write to the same log.
+    log_dir = (paths or AppPaths.default()).ensure_log_dir()
+
     if debug:
-        file_handler = logging.FileHandler("runtime/logs/downloader-debug.log", encoding="utf-8")
+        file_handler = logging.FileHandler(log_dir / "downloader-debug.log", encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.DEBUG)
         handlers.extend([file_handler, console_handler])
         level = logging.DEBUG
     else:
-        file_handler = logging.FileHandler("runtime/logs/downloader.log", encoding="utf-8")
+        file_handler = logging.FileHandler(log_dir / "downloader.log", encoding="utf-8")
         file_handler.setLevel(logging.INFO)
         handlers.append(file_handler)
         level = logging.INFO
@@ -113,9 +116,13 @@ def run_application(*, debug: bool = False, smoke_test: bool = False) -> int:
     if not application:
         application = QApplication(sys.argv)
     
-    # Use max_concurrent_downloads=3 (Phase 5)
-    manager = DownloadManager(output_dir="runtime/downloads", max_concurrent_downloads=3)
-    window = MainWindow(manager)
+    # The directory comes from the user's persisted choice, and may legitimately
+    # be absent on first run - the window asks for one when a download starts.
+    settings = AppSettings()
+    manager = DownloadManager(
+        output_dir=settings.get_download_directory(), max_concurrent_downloads=3
+    )
+    window = MainWindow(manager, settings)
 
     if smoke_test:
         logger.info("Smoke test passed: Components constructed successfully")

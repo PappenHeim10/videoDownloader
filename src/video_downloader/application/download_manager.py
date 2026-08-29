@@ -14,20 +14,30 @@ logger = logging.getLogger(__name__)
 class DownloadManager:
     def __init__(
         self,
-        output_dir: str | Path = "downloads",
+        output_dir: str | Path | None = None,
         max_concurrent_downloads: int | None = None,
         job_runner: Callable[[DownloadJob], object] = run_download_job,
     ) -> None:
-        self.output_dir = Path(output_dir).expanduser().resolve()
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        (self.output_dir / ".state").mkdir(exist_ok=True)
+        # No default directory on purpose. Choosing one is a user decision made
+        # above this layer; falling back to a relative path here is exactly how
+        # the destination used to depend on the working directory.
+        self.output_dir = self._prepare(output_dir) if output_dir is not None else None
         self._semaphore = asyncio.Semaphore(max_concurrent_downloads) if max_concurrent_downloads else None
         self._job_runner = job_runner
         self._jobs: dict[str, DownloadJob] = {}
         self._shutdown = False
-        self._load_existing_files()
+        if self.output_dir is not None:
+            self._load_existing_files()
+
+    @staticmethod
+    def _prepare(output_dir: str | Path) -> Path:
+        resolved = Path(output_dir).expanduser().resolve()
+        resolved.mkdir(parents=True, exist_ok=True)
+        (resolved / ".state").mkdir(exist_ok=True)
+        return resolved
 
     def _load_existing_files(self) -> None:
+        assert self.output_dir is not None
         for path in sorted(self.output_dir.iterdir()):
             if path.is_file() and path.suffix.lower() in {".mp4", ".ts"}:
                 job = DownloadJob(url="", quality="best", output_dir=self.output_dir, title=path.name)
@@ -36,10 +46,27 @@ class DownloadManager:
                 job.transition(LifecycleState.COMPLETED)
                 self._jobs[job.id] = job
 
-    def add_download(self, url: str, quality: str | int = "best", remux: bool = True) -> DownloadJob:
+    def add_download(
+        self,
+        url: str,
+        quality: str | int = "best",
+        remux: bool = True,
+        output_dir: str | Path | None = None,
+    ) -> DownloadJob:
         if self._shutdown:
             raise RuntimeError("DownloadManager ist bereits beendet")
-        job = DownloadJob(url=url, quality=quality, output_dir=self.output_dir, remux=remux)
+
+        # The caller may pin a directory per job. That is what makes a settings
+        # change apply to future jobs only: running and finished jobs keep the
+        # directory they were created with.
+        target = self._prepare(output_dir) if output_dir is not None else self.output_dir
+        if target is None:
+            raise ValueError(
+                "Kein Download-Verzeichnis konfiguriert. "
+                "Waehle eines in der GUI oder uebergib output_dir."
+            )
+
+        job = DownloadJob(url=url, quality=quality, output_dir=target, remux=remux)
         self._jobs[job.id] = job
         logger.info("[JOB %s] Download added url=%s quality=%s remux=%s", job.id, job.url, job.quality, job.remux)
         job.transition(LifecycleState.QUEUED)

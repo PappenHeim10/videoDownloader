@@ -14,6 +14,7 @@ from video_downloader.application.download_manager import DownloadManager
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
 from video_downloader.application.download_service import run_download_job
 from video_downloader.ui.main_window import MainWindow
+from video_downloader.infrastructure.settings import AppSettings
 
 # 1/2. Imports and Entry point tests
 
@@ -68,26 +69,38 @@ def qt_app():
         app = QApplication([])
     return app
 
-def test_gui_to_manager_wiring(qt_app):
+def test_gui_to_manager_wiring(qt_app, tmp_path, monkeypatch):
+    # Isolated settings root: a test must never read or write the real AppData.
+    monkeypatch.setenv("VIDEO_DOWNLOADER_HOME", str(tmp_path / "appdata"))
+    target = tmp_path / "videos"
+    target.mkdir()
+    settings = AppSettings()
+    settings.set_download_directory(target)
+
     manager = MagicMock(spec=DownloadManager)
     manager.get_jobs.return_value = []
-    
+
     # Needs to return a mock job
-    dummy_job = DownloadJob(url="a", quality="best", output_dir=Path("o"))
+    dummy_job = DownloadJob(url="a", quality="best", output_dir=target)
     manager.add_download.return_value = dummy_job
-    
-    window = MainWindow(manager)
+
+    window = MainWindow(manager, settings)
     window.url.setText("http://test")
     window.quality.setText("720")
     window.add_download()
-    
-    manager.add_download.assert_called_once_with("http://test", "720")
+
+    # The window now resolves the destination and hands it down explicitly; the
+    # manager no longer decides where anything lands.
+    manager.add_download.assert_called_once_with(
+        "http://test", "720", output_dir=target.resolve()
+    )
 
 # 6. Async Call Boundaries
 
 @pytest.mark.asyncio
-async def test_async_method_boundaries():
-    manager = DownloadManager()
+async def test_async_method_boundaries(tmp_path):
+    # An explicit directory: the manager has no default any more, by design.
+    manager = DownloadManager(tmp_path)
     
     # start_download is synchronous but returns a Task
     job = manager.add_download("a")
