@@ -4,6 +4,7 @@ import time
 import shutil
 import argparse
 import subprocess
+import tempfile
 from pathlib import Path
 
 def print_header(title: str):
@@ -57,6 +58,62 @@ def run_pyinstaller(spec_file: str, distpath: str, clean: bool):
         print(f"\n[!] PyInstaller failed with exit code {e.returncode}.")
         return False
 
+SMOKE_MARKER = "VideoDownloader smoke OK"
+
+ARTIFACTS = {
+    # mode -> path of the executable this mode's spec actually produces
+    "dev": Path("dist") / "dev" / "VideoDownloader.Debug" / "VideoDownloader.Debug.exe",
+    "release": Path("dist") / "release" / "VideoDownloader.exe",
+}
+
+
+def smoke_test_artifact(mode: str) -> bool:
+    """Prove the executable we just built can start.
+
+    A green build used to mean "PyInstaller exited 0", which says nothing about
+    whether the artifact can import the application. It is also not enough to
+    check the exit code of *some* executable: a stale binary from an earlier
+    layout sat in dist/ for a day and failed with ModuleNotFoundError while the
+    build reported success. So this runs the exact artifact of this mode, from an
+    unrelated working directory, and requires the marker that only appears after
+    video_downloader and bootstrap have been imported and the components built.
+    """
+    print_header("Smoke Testing Artifact")
+    exe = ARTIFACTS[mode]
+    if not exe.is_file():
+        print(f"[!] Expected artifact not found: {exe}")
+        return False
+
+    print(f"Running {exe} --smoke-test")
+    with tempfile.TemporaryDirectory() as foreign_cwd:
+        result = subprocess.run(
+            [str(exe.resolve()), "--smoke-test"],
+            cwd=foreign_cwd,  # nothing may depend on being started from the repo
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        leftovers = sorted(p.name for p in Path(foreign_cwd).iterdir())
+
+    if result.returncode != 0:
+        print(f"[!] Artifact exited with {result.returncode}.")
+        print(result.stderr.strip()[-2000:])
+        return False
+
+    if SMOKE_MARKER not in result.stdout:
+        print(f"[!] Artifact exited 0 but never printed {SMOKE_MARKER!r}.")
+        print("    That means it did not reach the end of startup.")
+        print(result.stdout.strip()[-2000:])
+        return False
+
+    if leftovers:
+        print(f"[!] Artifact wrote into its working directory: {', '.join(leftovers)}")
+        return False
+
+    print("Artifact imported the application, started, and left the CWD untouched.")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Reproducible Build Orchestrator")
     parser.add_argument("mode", choices=["dev", "release"], help="Build mode: 'dev' for fast directory builds, 'release' for clean single-file executables.")
@@ -92,13 +149,18 @@ def main():
     build_success = run_pyinstaller(spec_file, distpath, clean=is_clean)
     if not build_success:
         sys.exit(1)
-        
+
+    if not smoke_test_artifact(args.mode):
+        print("\n[!] Artifact smoke test failed. The build is not usable.")
+        sys.exit(1)
+
     duration = time.time() - start_time
     
     print_header("Build Summary")
     print(f"Build Mode      : {args.mode}")
     print(f"Tests           : {tests_passed}")
     print(f"Executable Build: Passed")
+    print(f"Artifact Smoke  : Passed ({ARTIFACTS[args.mode]})")
     print(f"Duration        : {duration:.2f} seconds")
     print(f"Output Location : {os.path.abspath(distpath)}")
     print("\nALL BUILDS AND TESTS PASSED SUCCESSFULLY")
