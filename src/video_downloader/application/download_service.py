@@ -76,7 +76,17 @@ def _handle_download_result(job: DownloadJob, result: Any) -> None:
         job.transition(LifecycleState.FAILED)
     else:
         job.progress = 100.0 if job.total_segments else job.progress
-        job.output_file = _result_path(result)
+        # The downloader's success contract carries no path: BaseCore.download is
+        # annotated DownloadReport | bool, returns True unless return_report is
+        # requested, and DownloadReport has no path-like field at all. Assigning the
+        # lookup result unconditionally therefore replaced the path we computed
+        # before the download with None on every successful run - which is exactly
+        # the file that had just been written.
+        # Only adopt a result path when there actually is one, so a downloader that
+        # someday reports an authoritative location can still override us.
+        resolved = _result_path(result)
+        if resolved is not None:
+            job.output_file = resolved
         job.transition(LifecycleState.COMPLETED)
         job.state_file.unlink(missing_ok=True)
 

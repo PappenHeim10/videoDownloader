@@ -48,20 +48,15 @@ async def _run(title: str, output_dir: Path):
     client, core = _client_for(title)
     job = DownloadJob(url=PROVIDER_URL, quality="best", output_dir=output_dir)
 
-    # `job.output_file` is captured while the job is still running. Reading it
-    # after completion would hit B1 (the result handler overwrites it with None),
-    # which is deliberately out of scope for this change.
-    recorded: dict[str, Path] = {}
-
-    def observe(j: DownloadJob) -> None:
-        if j.state == LifecycleState.DOWNLOADING and j.output_file is not None:
-            recorded.setdefault("app", j.output_file)
-
-    job.on_change = observe
     await run_download_job(job, client_factory=lambda: client)
 
+    # Read straight off the finished job. This used to need an observer to catch
+    # the value mid-flight, because B1 cleared it on successful completion.
+    assert job.state == LifecycleState.COMPLETED
+    assert job.output_file is not None
+
     provider_path = Path(core.download.await_args.args[0].path)
-    return recorded["app"], provider_path, job
+    return job.output_file, provider_path, job
 
 
 @pytest.mark.asyncio
@@ -80,8 +75,12 @@ async def _run(title: str, output_dir: Path):
     ],
 )
 async def test_app_and_provider_derive_the_same_filename(tmp_path, title):
-    app_path, provider_path, _ = await _run(title, tmp_path)
+    app_path, provider_path, job = await _run(title, tmp_path)
+
     assert app_path.name == provider_path.name
+    # The completed job must still carry that path - the UI opens and deletes by it.
+    assert job.state == LifecycleState.COMPLETED
+    assert job.output_file == app_path
 
 
 @pytest.mark.asyncio
