@@ -31,7 +31,12 @@ class AppSettings:
 
     def _read(self) -> dict:
         try:
-            raw = self.paths.config_file.read_text(encoding="utf-8")
+            # utf-8-sig, not utf-8: this file lives where the user can reach it,
+            # and every common Windows editor - Notepad, PowerShell's Set-Content,
+            # VS Code with the BOM setting on - writes UTF-8 with a byte order
+            # mark. Plain utf-8 chokes on it and the configured directory would be
+            # silently discarded. Writing stays BOM-free.
+            raw = self.paths.config_file.read_text(encoding="utf-8-sig")
         except FileNotFoundError:
             return {}
         except OSError as error:

@@ -155,6 +155,29 @@ def test_a_replacement_directory_overwrites_the_invalid_one(settings, tmp_path):
     assert settings.get_download_directory() == replacement.resolve()
 
 
+def test_a_settings_file_with_a_utf8_bom_is_still_read(settings, tmp_path):
+    # Found by the frozen smoke test: PowerShell's Set-Content -Encoding utf8
+    # writes a BOM, and every common Windows editor can do the same. Rejecting
+    # such a file would silently drop the user's configured directory.
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    config = AppPaths.default()
+    config.ensure_root()
+    config.config_file.write_text(
+        json.dumps({"download_directory": str(videos)}), encoding="utf-8-sig"
+    )
+
+    assert settings.get_download_directory() == videos
+
+
+def test_settings_are_written_without_a_bom(settings, tmp_path):
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    settings.set_download_directory(videos)
+
+    assert not AppPaths.default().config_file.read_bytes().startswith(b"\xef\xbb\xbf")
+
+
 def test_a_corrupt_settings_file_does_not_crash_the_application(settings, app_root):
     AppPaths.default().ensure_root()
     AppPaths.default().config_file.write_text("{ this is not json", encoding="utf-8")
