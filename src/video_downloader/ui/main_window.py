@@ -4,13 +4,16 @@ import asyncio
 
 from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
+from pathlib import Path
+
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QPushButton, QProgressBar, QVBoxLayout, QWidget,
 )
 
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
 from video_downloader.application.download_manager import DownloadManager
+from video_downloader.infrastructure.settings import AppSettings
 
 
 class JobBridge(QObject):
@@ -58,12 +61,16 @@ class DownloadItem(QFrame):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, manager: DownloadManager):
+    def __init__(self, manager: DownloadManager, settings: AppSettings | None = None):
         super().__init__()
         self.manager = manager
+        self.settings = settings or AppSettings()
         self._closing = False
         self._shutdown_done = False
         self.setWindowTitle("Video Downloader")
+
+        folder_menu = self.menuBar().addMenu("&Einstellungen")
+        folder_menu.addAction("Download-Ordner ändern…", self.change_download_directory)
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -82,11 +89,55 @@ class MainWindow(QMainWindow):
         for job in manager.get_jobs():
             self.add_item(job)
 
+    def _ask_for_directory(self, title: str) -> Path | None:
+        """Open the folder picker. Returns None when the user cancels.
+
+        Separate method so tests can drive the flow without a real dialog.
+        """
+        chosen = QFileDialog.getExistingDirectory(self, title)
+        return Path(chosen) if chosen else None
+
+    def resolve_download_directory(self) -> Path | None:
+        """The directory the next job should use, asking the user if needed.
+
+        A stored directory that no longer exists counts as unset - AppSettings
+        reports it as absent - so we ask again rather than inventing a fallback
+        next to the executable or in the working directory.
+        """
+        configured = self.settings.get_download_directory()
+        if configured is not None:
+            return configured
+
+        chosen = self._ask_for_directory("Zielordner für Downloads wählen")
+        if chosen is None:
+            return None
+        return self.settings.set_download_directory(chosen)
+
+    def change_download_directory(self) -> Path | None:
+        chosen = self._ask_for_directory("Neuen Zielordner für Downloads wählen")
+        if chosen is None:
+            return None
+        # Future jobs only. Running and finished jobs keep the directory they
+        # were created with, so nothing moves under the user's feet.
+        return self.settings.set_download_directory(chosen)
+
     def add_download(self):
         url = self.url.text().strip()
-        if url:
-            self.add_item(self.manager.add_download(url, self.quality.text().strip() or "best"))
-            self.url.clear()
+        if not url:
+            return
+
+        directory = self.resolve_download_directory()
+        if directory is None:
+            # Cancelling the picker is an ordinary decision, not an error: no job
+            # is created, nothing is written, and the window stays usable.
+            self.statusBar().showMessage("Download abgebrochen: kein Zielordner gewählt.", 5000)
+            return
+
+        job = self.manager.add_download(
+            url, self.quality.text().strip() or "best", output_dir=directory
+        )
+        self.add_item(job)
+        self.url.clear()
 
     def add_item(self, job: DownloadJob):
         item = QListWidgetItem(self.list)
