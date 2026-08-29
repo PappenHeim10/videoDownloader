@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 #: components - which is the thing a build needs proven.
 SMOKE_MARKER = "VideoDownloader smoke OK"
 
+#: Frameworks whose DEBUG output is about their own plumbing rather than about
+#: this application. Named explicitly so raising our level never raises theirs.
+THIRD_PARTY_LOG_LEVELS = {
+    "qasync": logging.WARNING,
+    "asyncio": logging.WARNING,
+}
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -88,6 +95,14 @@ def configure_logging(debug: bool, paths: AppPaths | None = None):
         handler.setFormatter(formatter)
         
     logging.basicConfig(level=level, handlers=handlers, force=True)
+
+    # Turning on application DEBUG must not turn on third-party executor internals.
+    # qasync logs every callback it dispatches together with its arguments, and the
+    # HLS writer is dispatched as write_part(path, data) - so `data` is a whole
+    # segment, and a debug download wrote megabytes of raw bytes into the log and
+    # slowed visibly while doing it. Application loggers keep their level.
+    for name, third_party_level in THIRD_PARTY_LOG_LEVELS.items():
+        logging.getLogger(name).setLevel(third_party_level)
 
 def run_application(*, debug: bool = False, smoke_test: bool = False) -> int:
     loop_debug_enabled = debug and _env_flag("DOWNLOADER_ASYNCIO_DEBUG", default=False)
