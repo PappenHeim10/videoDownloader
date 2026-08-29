@@ -13,8 +13,8 @@ dependencies = [
     # Pinned to known-green fork commits. Do not switch these to branch refs:
     # the point of the pin is a reproducible dependency state.
     # [hls] pulls m3u8 + av, which the segment download and the TS->MP4 remux need.
-    "eaf_base_api[hls] @ git+https://github.com/PappenHeim10/eaf_base_api.git@ec97b6e",
-    "xhamster_api @ git+https://github.com/PappenHeim10/unofficial-api-for-xhamster.git@5d5ac13",
+    "eaf_base_api[hls] @ git+https://github.com/PappenHeim10/eaf_base_api.git@ae01568",
+    "xhamster_api @ git+https://github.com/PappenHeim10/unofficial-api-for-xhamster.git@8f8ae0e",
 ]
 
 [project.optional-dependencies]
