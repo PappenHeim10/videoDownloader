@@ -8,6 +8,21 @@ from pathlib import Path
 from typing import Callable
 
 
+class ProgressUnit(StrEnum):
+    """What a job's progress counters count.
+
+    The counters themselves keep their names and their meaning: a segmented
+    HLS download still reports segments in `downloaded_segments` /
+    `total_segments`, which is what every existing caller and test reads. A
+    progressive HTTP download puts bytes in the same pair, and this is how a
+    reader knows which of the two it is looking at - "4 / 12" and
+    "4194304 / 12582912" need very different words in front of a user.
+    """
+
+    SEGMENTS = "segments"
+    BYTES = "bytes"
+
+
 class LifecycleState(StrEnum):
     CREATED = "created"
     QUEUED = "queued"
@@ -31,6 +46,9 @@ class DownloadJob:
     state: LifecycleState = LifecycleState.CREATED
     downloaded_segments: int = 0
     total_segments: int = 0
+    #: Segments unless a transport says otherwise, so a job built by any
+    #: existing caller keeps exactly the semantics it had.
+    progress_unit: ProgressUnit = ProgressUnit.SEGMENTS
     progress: float = 0.0
     error: str | None = None
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -40,6 +58,17 @@ class DownloadJob:
     @property
     def state_file(self) -> Path:
         return self.output_dir / ".state" / f"{self.id}.json"
+
+    @property
+    def has_known_total(self) -> bool:
+        """Whether `progress` means anything yet.
+
+        A progressive download over a server that states no length reports a
+        total of 0 for its whole run - deliberately, because inventing a
+        denominator would put a moving percentage on an unknown end. The UI
+        needs to be able to tell that apart from "0 of 0 done".
+        """
+        return self.total_segments > 0
 
     def transition(self, state: LifecycleState) -> None:
         self.state = state
