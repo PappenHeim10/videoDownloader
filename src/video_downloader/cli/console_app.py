@@ -6,6 +6,7 @@ from pathlib import Path
 
 from video_downloader.application.download_manager import DownloadManager
 from video_downloader.domain.download_job import LifecycleState
+from video_downloader.infrastructure.event_loop import new_event_loop
 from video_downloader.infrastructure.paths import AppPaths
 from video_downloader.infrastructure.settings import AppSettings
 
@@ -86,7 +87,10 @@ def configure_logging(paths: AppPaths | None = None) -> None:
 
 def main() -> int:
     configure_logging()
-    return asyncio.run(ConsoleApp(parse_args()).run())
+    # Not asyncio's own default loop: on Windows that is a ProactorEventLoop,
+    # which the curl_cffi transport cannot register its sockets on. See
+    # infrastructure.event_loop.
+    return asyncio.run(ConsoleApp(parse_args()).run(), loop_factory=new_event_loop)
 
 
 if __name__ == "__main__":
