@@ -200,13 +200,41 @@ def test_the_portrait_case_the_label_match_exists_for():
     assert select_progressive_source(ladder, "best") is portrait
 
 
-def test_the_same_portrait_video_is_not_found_by_the_integer_1080():
-    """A tier of 1920 is not a tier of 1080, and is never treated as one."""
+def test_the_integer_1080_never_matches_the_portrait_videos_label():
+    """A tier of 1920 is not a tier of 1080, and is never treated as one.
+
+    What the integer reaches instead is decided by the numeric rule alone, so
+    a smaller candidate wins here - the same request as a string would have
+    matched the label and taken the portrait file.
+    """
     portrait = http("portrait", value=1920, label="1080p", size=500)
     smaller = http("480", value=480, label="480p", size=100)
 
-    # No exact tier, no smaller one than 1080 except 480 -> the next smaller.
     assert select_progressive_source([smaller, portrait], 1080) is smaller
+    assert select_progressive_source([smaller, portrait], "1080p") is portrait
+
+
+def test_the_integer_1080_still_reaches_the_portrait_video_through_the_fallback():
+    """Not matching is not the same as not being selected.
+
+    With nothing smaller to fall back to, the last rule applies - the smallest
+    video available - and that is the portrait file. So the two spellings can
+    agree on the result while disagreeing about the reason, and the claim worth
+    making is only about the *matching*, never about the outcome.
+    """
+    portrait = http("portrait", value=1920, label="1080p", size=500)
+
+    assert select_progressive_source([portrait], 1080) is portrait
+    assert select_progressive_source([portrait], "1080p") is portrait
+
+
+def test_the_two_spellings_diverge_only_when_a_smaller_candidate_exists():
+    portrait = http("portrait", value=1920, label="1080p", size=500)
+    bigger = http("2160", value=2160, label="2160p", size=900)
+
+    # Nothing below 1080 -> the smallest video, whichever way it was asked for.
+    assert select_progressive_source([portrait, bigger], 1080) is portrait
+    assert select_progressive_source([portrait, bigger], "1080p") is portrait
 
 
 def test_a_string_falls_through_to_the_numeric_rule_when_no_label_matches():

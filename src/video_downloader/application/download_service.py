@@ -131,7 +131,11 @@ def select_progressive_source(
       on how a caller happened to spell its argument.
 
     Both spellings then fall through to the same numeric rule: exact tier, else
-    the next smaller tier, else the smallest video available.
+    the next smaller tier, else the smallest video available. The distinction is
+    about what *matches*, never about what is ultimately returned - with nothing
+    smaller to fall back to, the last rule can hand an integer request the very
+    file its label would have matched. Two spellings agreeing on a result is not
+    evidence that they took the same route to it.
 
     A string that is neither a preference, nor a label, nor a number cannot be
     interpreted - the best available source is used rather than failing the
