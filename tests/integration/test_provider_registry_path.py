@@ -41,8 +41,10 @@ from video_downloader.application.provider_session import (
 )
 from video_downloader.bootstrap import create_job_runner, create_provider_session
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
+from video_downloader.providers import PeerTubeAdapter, peertube
 
 XHAMSTER_URL = "https://xhamster.com/videos/example-1"
+PEERTUBE_URL = "https://video.blender.org/w/pVUiwGhkrrwWqW7jyHer4z"
 DIRECT_URL = "https://cdn.example/live/master.m3u8"
 UNSUPPORTED_URL = "https://example.com/watch?v=abc"
 
@@ -178,14 +180,14 @@ async def test_an_unsupported_url_keeps_the_registrys_own_error():
 
 
 @pytest.mark.asyncio
-async def test_the_production_registry_is_not_ambiguous_about_either_url(monkeypatch):
-    # The two registered adapters must not both claim the same link; if they ever
-    # do, resolve() raises AmbiguousProviderError instead of downloading.
+async def test_the_production_registry_is_not_ambiguous_about_any_url(monkeypatch):
+    # No two registered adapters may claim the same link; if they ever do,
+    # resolve() raises AmbiguousProviderError instead of downloading.
     monkeypatch.setattr(XHamsterAdapter, "resolve", lambda self, url: media_for(url))
     session = create_provider_session()
     try:
         assert session.registry._providers  # composition actually happened
-        for url in (XHAMSTER_URL, DIRECT_URL):
+        for url in (XHAMSTER_URL, PEERTUBE_URL, DIRECT_URL):
             claiming = [type(p).__name__ for p in session.registry._providers if p.supports(url)]
             assert len(claiming) == 1, f"{url} claimed by {claiming}"
     finally:
@@ -462,11 +464,15 @@ async def test_two_simultaneous_jobs_keep_independent_resources_and_state(tmp_pa
 # --- the composition root ----------------------------------------------------
 
 
-def test_the_production_registry_registers_both_adapters():
+def test_the_production_registry_registers_every_adapter():
     session = create_provider_session()
     try:
         registered = {type(p).__name__ for p in session.registry._providers}
-        assert registered == {"XHamsterAdapter", "DirectMediaAdapter"}
+        assert registered == {
+            "XHamsterAdapter",
+            "PeerTubeAdapter",
+            "DirectMediaAdapter",
+        }
     finally:
         asyncio.run(session.close())
 
@@ -510,3 +516,117 @@ async def test_the_manager_never_learns_about_providers(tmp_path):
     assert created[0].registry.resolved == [XHAMSTER_URL]
     assert not hasattr(manager, "registry")
     await manager.shutdown()
+
+
+# --- the PeerTube provider in the production registry ------------------------
+
+
+class _RecordingExtractionSession:
+    """Stands in for the adapter's curl session and counts its own closing."""
+
+    def __init__(self) -> None:
+        self.closed = 0
+
+    async def get(self, url, **kwargs):  # pragma: no cover - only runs on a bug
+        raise AssertionError(f"no request expected during selection, got {url}")
+
+    async def close(self) -> None:
+        self.closed += 1
+
+
+@pytest.mark.asyncio
+async def test_a_peertube_url_selects_the_peertube_adapter(monkeypatch):
+    session = create_provider_session()
+    seen: list[tuple[str, str]] = []
+
+    async def fake_resolve(self, url):
+        seen.append((type(self).__name__, url))
+        return media_for(url)
+
+    monkeypatch.setattr(PeerTubeAdapter, "resolve", fake_resolve)
+    monkeypatch.setattr(XHamsterAdapter, "resolve", _must_not_resolve)
+    monkeypatch.setattr(DirectMediaAdapter, "resolve", _must_not_resolve)
+
+    try:
+        media = await session.registry.resolve(PEERTUBE_URL)
+    finally:
+        await session.close()
+
+    assert seen == [("PeerTubeAdapter", PEERTUBE_URL)]
+    assert media.original_url == PEERTUBE_URL
+
+
+@pytest.mark.asyncio
+async def test_a_watch_url_and_a_manifest_url_are_claimed_by_one_adapter_each():
+    """The two adapters that both deal in HLS must not overlap.
+
+    PeerTube's own manifest is an `.m3u8` on the same instance, so the pair is
+    the realistic ambiguity risk: the watch page belongs to the site adapter,
+    the manifest to the direct one, and neither reaches into the other.
+    """
+    session = create_provider_session()
+    manifest_on_the_instance = (
+        "https://video.blender.org/object-storage/streaming_playlists/"
+        "hls/c1c8d764-de9b-4800-9274-5a26ac7db66b/master.m3u8"
+    )
+
+    def claiming(url: str) -> set[str]:
+        return {
+            type(p).__name__ for p in session.registry._providers if p.supports(url)
+        }
+
+    try:
+        assert claiming(PEERTUBE_URL) == {"PeerTubeAdapter"}
+        assert claiming(DIRECT_URL) == {"DirectMediaAdapter"}
+        assert claiming(manifest_on_the_instance) == {"DirectMediaAdapter"}
+        assert claiming(XHAMSTER_URL) == {"XHamsterAdapter"}
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_the_session_closes_the_peertube_adapter_it_registered(monkeypatch):
+    built: list[_RecordingExtractionSession] = []
+
+    def build_session() -> _RecordingExtractionSession:
+        built.append(_RecordingExtractionSession())
+        return built[-1]
+
+    monkeypatch.setattr(peertube, "AsyncSession", build_session)
+
+    session = create_provider_session()
+    adapter = next(
+        p for p in session.registry._providers if isinstance(p, PeerTubeAdapter)
+    )
+    # The adapter opens its transport on first use, so a session that never
+    # resolved has nothing to close; materialise it to observe the closing.
+    adapter._session_for_request()
+    assert len(built) == 1
+
+    await session.close()
+    await session.close()
+
+    assert built[0].closed == 1
+
+
+@pytest.mark.asyncio
+async def test_two_sessions_never_share_a_peertube_extraction_transport(monkeypatch):
+    monkeypatch.setattr(peertube, "AsyncSession", _RecordingExtractionSession)
+
+    first = create_provider_session()
+    second = create_provider_session()
+    try:
+        one = next(
+            p for p in first.registry._providers if isinstance(p, PeerTubeAdapter)
+        )
+        other = next(
+            p for p in second.registry._providers if isinstance(p, PeerTubeAdapter)
+        )
+
+        assert one is not other
+        assert one._session_for_request() is not other._session_for_request()
+        # And neither of them is the engine the job downloads over.
+        assert one._session_for_request() is not first.core
+    finally:
+        await first.close()
+        await second.close()
