@@ -1,0 +1,14 @@
+{
+  "uuid": "c1c8d764-de9b-4800-9274-5a26ac7db66b",
+  "shortUUID": "pVUiwGhkrrwWqW7jyHer4z",
+  "name": "Blender 5.3 is UNFAIR - Blender Today LIVE #288",
+  "downloadEnabled": true,
+  "isLive": false,
+  "streamingPlaylists": [
+    {
+      "id": 24833,
+      "type": 1,
+      "playlistUrl": "https://video.blender.org/object-storage/streaming_playlists/hls/c1c8d764-de9b-4800-9274-5a26ac7db66b/6428d93f-70e9-457d-9d64-ace4c7d6eea9-master.m3u8"
+    }
+  ]
+}
