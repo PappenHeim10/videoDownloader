@@ -22,6 +22,7 @@ from video_downloader.application.provider_session import ProviderSession
 from video_downloader.domain.download_job import DownloadJob
 from video_downloader.infrastructure.paths import AppPaths
 from video_downloader.infrastructure.settings import AppSettings
+from video_downloader.providers import PeerTubeAdapter
 from video_downloader.ui.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -73,10 +74,16 @@ def create_provider_session() -> ProviderSession:
       applied per request by `BaseCore`, so an xHamster source brings its
       `Referer` along and a direct `.m3u8` source stays header-free instead of
       inheriting one from a neighbour.
+
+    The registration order is site adapters first, the direct-URL adapter last,
+    and it carries no meaning beyond reading order: selection is by `supports()`
+    alone, and two adapters claiming one URL stays an `AmbiguousProviderError`
+    rather than being silently settled by position.
     """
     core = BaseCore(RuntimeConfig())
     registry = ProviderRegistry()
     registry.register(XHamsterAdapter())
+    registry.register(PeerTubeAdapter())
     registry.register(DirectMediaAdapter())
     return ProviderSession(registry=registry, core=core)
 
