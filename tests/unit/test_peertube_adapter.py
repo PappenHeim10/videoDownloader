@@ -5,10 +5,13 @@ answers from video.blender.org, so the happy path is checked against a body the
 instance actually returned rather than against one written to match the code.
 
 `peertube_video_without_hls.json` is the video the handover named as the sample
-URL. It turned out to carry no HLS at all - `streamingPlaylists` is empty and the
-player falls back to a progressive MP4 - which makes it a measured rather than
-invented case for the "no HLS" path, and a standing argument against indexing
+URL. It carries no HLS at all - `streamingPlaylists` is empty and the player
+streams the progressive MP4 in `files[]` - which makes it a measured rather than
+invented case for the progressive path, and a standing argument against indexing
 `streamingPlaylists[0]`.
+
+`peertube_video_progressive_variants.json` is the multi-resolution shape, with
+the audio-only rendition PeerTube emits alongside the real ones.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from video_downloader.providers.peertube import (
     PeerTubeAdapter,
     PeerTubeDownloadDisabledError,
     PeerTubeExtractionError,
+    PeerTubeNoSupportedSourceError,
 )
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -297,15 +301,6 @@ async def test_a_video_with_downloads_disabled_is_reported_as_such():
 
 
 @pytest.mark.asyncio
-async def test_the_measured_video_without_any_playlist_fails_cleanly():
-    """The URL the handover named: real, public, and carrying no HLS at all."""
-    adapter, _ = adapter_returning(load_fixture("peertube_video_without_hls.json"))
-
-    with pytest.raises(PeerTubeExtractionError):
-        await adapter.resolve("https://video.blender.org/w/eJeLCkQyxvK1joGAaBf5PY")
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -477,3 +472,364 @@ async def test_the_source_headers_are_the_media_s_own_dict():
     first.sources[0].headers["Referer"] = "https://example.invalid/"
 
     assert second.sources[0].headers == {}
+
+
+# --- progressive files ----------------------------------------------------
+#
+# `files[]` is the other half of a PeerTube answer: standalone MP4s the
+# instance's own player streams when there is no HLS playlist. The adapter
+# translates them into HTTP sources and nothing more - which one gets
+# downloaded is the application's decision, so these tests are about the
+# mapping and the filter, never about a preference.
+
+
+WITHOUT_HLS_WATCH = "https://video.blender.org/w/eJeLCkQyxvK1joGAaBf5PY"
+MEASURED_FILE_URL = (
+    "https://video.blender.org/object-storage/web_videos/"
+    "6f2c86d1-25c1-4f4f-a83e-66dc96be83ee-720.mp4"
+)
+VARIANTS_WATCH = "https://video.example/w/aB3dEfGhJkLmNpQrStUvWx"
+
+
+def variants_payload() -> dict:
+    return load_fixture("peertube_video_progressive_variants.json")
+
+
+def video_files(payload: dict) -> list[dict]:
+    """The fixture's real video entries, i.e. everything but the audio-only one."""
+    return [entry for entry in payload["files"] if entry["resolution"]["id"] != 0]
+
+
+@pytest.mark.asyncio
+async def test_the_measured_video_without_hls_resolves_to_its_progressive_file():
+    """The URL the handover named: real, public, and carrying no HLS at all.
+
+    It used to be the proof that "no playlist" fails cleanly. It is now the
+    proof that such a video is downloadable, which is what its own player does.
+    """
+    adapter, _ = adapter_returning(load_fixture("peertube_video_without_hls.json"))
+
+    media = await adapter.resolve(WITHOUT_HLS_WATCH)
+
+    assert [source.source_type for source in media.sources] == ["HTTP"]
+    source = media.sources[0]
+    assert source.url == MEASURED_FILE_URL
+    assert source.expected_size == 382672246
+    assert source.quality_value == 720
+    assert source.quality_label == "720p"
+    assert source.headers == {}
+
+
+@pytest.mark.asyncio
+async def test_the_progressive_source_uses_file_url_never_file_download_url():
+    """`fileDownloadUrl` is the browser-save endpoint, not the stream."""
+    payload = load_fixture("peertube_video_without_hls.json")
+    download_url = payload["files"][0]["fileDownloadUrl"]
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WITHOUT_HLS_WATCH)
+
+    assert media.sources[0].url == MEASURED_FILE_URL
+    assert download_url  # the fixture really does offer the other one
+    assert all(source.url != download_url for source in media.sources)
+
+
+@pytest.mark.asyncio
+async def test_no_source_carries_a_filename_from_the_api():
+    """The output name is the application's; nothing here proposes one."""
+    adapter, _ = adapter_returning(load_fixture("peertube_video_without_hls.json"))
+
+    media = await adapter.resolve(WITHOUT_HLS_WATCH)
+
+    assert not hasattr(media.sources[0], "filename")
+    assert media.title == "BCON blues + Q&A #125 | Blender.Today LIVE"
+
+
+@pytest.mark.asyncio
+async def test_a_video_with_only_hls_publishes_only_that():
+    adapter, _ = adapter_returning(load_fixture("peertube_video.json"))
+
+    media = await adapter.resolve(WATCH_SHORT)
+
+    assert [source.source_type for source in media.sources] == ["HLS"]
+    assert media.sources[0].url == PLAYLIST_URL
+
+
+@pytest.mark.asyncio
+async def test_a_video_with_both_publishes_both_with_hls_first():
+    payload = load_fixture("peertube_video.json")
+    payload["files"] = variants_payload()["files"]
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WATCH_SHORT)
+
+    # The audio-only entry is gone; the three real renditions are not.
+    assert [source.source_type for source in media.sources] == [
+        "HLS", "HTTP", "HTTP", "HTTP"
+    ]
+    assert media.sources[0].url == PLAYLIST_URL
+
+
+@pytest.mark.asyncio
+async def test_several_progressive_resolutions_all_survive_with_their_metadata():
+    adapter, _ = adapter_returning(variants_payload())
+
+    media = await adapter.resolve(VARIANTS_WATCH)
+
+    assert [
+        (source.quality_value, source.quality_label, source.expected_size)
+        for source in media.sources
+    ] == [
+        (480, "480p", 104857600),
+        (720, "720p", 209715200),
+        (1080, "1080p", 419430400),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_federated_absolute_file_url_survives_untouched():
+    """The same rule the playlist has: the home instance names its own host."""
+    remote = "https://media.tube.tchncs.de/object-storage/web_videos/abc-720.mp4"
+    payload = load_fixture("peertube_video_without_hls.json")
+    payload["files"][0]["fileUrl"] = remote
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WITHOUT_HLS_WATCH)
+
+    assert media.sources[0].url == remote
+
+
+@pytest.mark.asyncio
+async def test_downloads_disabled_still_wins_over_a_progressive_file():
+    """The uploader's stated intent is checked before any source is built."""
+    payload = load_fixture("peertube_video_without_hls.json")
+    payload["downloadEnabled"] = False
+
+    adapter, _ = adapter_returning(payload)
+
+    with pytest.raises(PeerTubeDownloadDisabledError):
+        await adapter.resolve(WITHOUT_HLS_WATCH)
+
+
+# --- the candidate filter -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_audio_only_entry_is_dropped_next_to_real_video_files():
+    payload = variants_payload()
+    audio_url = payload["files"][0]["fileUrl"]
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(VARIANTS_WATCH)
+
+    assert all(source.url != audio_url for source in media.sources)
+    assert len(media.sources) == 3
+
+
+@pytest.mark.asyncio
+async def test_an_answer_with_nothing_but_audio_has_no_supported_source():
+    """Never a fallback: an audio file is not a smaller version of the video."""
+    payload = variants_payload()
+    payload["files"] = [payload["files"][0]]
+
+    adapter, _ = adapter_returning(payload)
+
+    with pytest.raises(PeerTubeNoSupportedSourceError):
+        await adapter.resolve(VARIANTS_WATCH)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mark_as_audio",
+    [
+        pytest.param(lambda entry: entry.__setitem__("hasVideo", False), id="hasVideo-false"),
+        pytest.param(
+            lambda entry: entry["resolution"].__setitem__("id", 0), id="resolution-id-0"
+        ),
+        pytest.param(lambda entry: entry.__setitem__("height", 0), id="height-0"),
+    ],
+)
+async def test_each_explicit_not_a_video_marker_drops_the_entry(mark_as_audio):
+    payload = load_fixture("peertube_video_without_hls.json")
+    mark_as_audio(payload["files"][0])
+
+    adapter, _ = adapter_returning(payload)
+
+    with pytest.raises(PeerTubeNoSupportedSourceError):
+        await adapter.resolve(WITHOUT_HLS_WATCH)
+
+
+@pytest.mark.asyncio
+async def test_a_silent_video_is_still_a_video():
+    """`hasAudio` is never a filter: a video with no sound is a video."""
+    payload = load_fixture("peertube_video_without_hls.json")
+    payload["files"][0]["hasAudio"] = False
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WITHOUT_HLS_WATCH)
+
+    assert [source.url for source in media.sources] == [MEASURED_FILE_URL]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutate", "expected_quality"),
+    [
+        pytest.param(lambda entry: entry.pop("hasVideo"), 720, id="hasVideo-missing"),
+        pytest.param(lambda entry: entry.__setitem__("width", None), 720, id="width-null"),
+        pytest.param(lambda entry: entry.pop("width"), 720, id="width-missing"),
+        pytest.param(lambda entry: entry.pop("height"), 720, id="height-missing"),
+        pytest.param(
+            lambda entry: entry.__setitem__("height", None), 720, id="height-null"
+        ),
+        # No resolution id: the height carries the tier instead.
+        pytest.param(lambda entry: entry.pop("resolution"), 720, id="resolution-missing"),
+        pytest.param(
+            lambda entry: entry["resolution"].pop("id"), 720, id="resolution-id-missing"
+        ),
+        pytest.param(
+            lambda entry: entry["resolution"].__setitem__("id", None),
+            720,
+            id="resolution-id-null",
+        ),
+    ],
+)
+async def test_absent_metadata_never_disqualifies_a_candidate(mutate, expected_quality):
+    """These fields are newer than the endpoint; missing is not "not a video"."""
+    payload = load_fixture("peertube_video_without_hls.json")
+    mutate(payload["files"][0])
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WITHOUT_HLS_WATCH)
+
+    assert [source.url for source in media.sources] == [MEASURED_FILE_URL]
+    assert media.sources[0].quality_value == expected_quality
+
+
+@pytest.mark.asyncio
+async def test_an_entry_with_no_usable_tier_at_all_is_still_offered():
+    payload = load_fixture("peertube_video_without_hls.json")
+    entry = payload["files"][0]
+    entry.pop("resolution")
+    entry.pop("height")
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WITHOUT_HLS_WATCH)
+
+    assert media.sources[0].quality_value is None
+    assert media.sources[0].quality_label is None
+    assert media.sources[0].expected_size == 382672246
+
+
+@pytest.mark.asyncio
+async def test_a_missing_size_leaves_the_expected_size_unstated():
+    payload = load_fixture("peertube_video_without_hls.json")
+    payload["files"][0].pop("size")
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WITHOUT_HLS_WATCH)
+
+    assert media.sources[0].expected_size is None
+
+
+@pytest.mark.asyncio
+async def test_a_portrait_video_keeps_the_instances_own_tier_and_label():
+    """The case the two fields exist for.
+
+    PeerTube ranks a portrait video by its long side, so a 1080x1920 video is
+    `resolution.id = 1920` and `label = "1080p"`. Both are stored as they
+    arrived: re-deriving either from the other would pick the wrong file.
+    """
+    payload = load_fixture("peertube_video_without_hls.json")
+    entry = payload["files"][0]
+    entry["resolution"] = {"id": 1920, "label": "1080p"}
+    entry["width"] = 1080
+    entry["height"] = 1920
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WITHOUT_HLS_WATCH)
+
+    assert media.sources[0].quality_value == 1920
+    assert media.sources[0].quality_label == "1080p"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "file_url",
+    [
+        pytest.param("javascript:alert(1)", id="hostile-scheme"),
+        pytest.param("file:///etc/passwd", id="file-scheme"),
+        pytest.param("ftp://video.example/x.mp4", id="ftp-scheme"),
+        pytest.param("https://user:secret@video.example/x.mp4", id="credentials"),
+        pytest.param("https://user@video.example/x.mp4", id="userinfo"),
+        pytest.param("/object-storage/web_videos/x.mp4", id="relative"),
+        pytest.param("web_videos/x.mp4", id="relative-bare"),
+        pytest.param("https:///x.mp4", id="no-host"),
+        pytest.param("", id="empty"),
+        pytest.param("   ", id="blank"),
+        pytest.param(None, id="null"),
+        pytest.param(42, id="not-a-string"),
+    ],
+)
+async def test_a_file_url_this_application_may_not_fetch_is_dropped(file_url):
+    payload = load_fixture("peertube_video_without_hls.json")
+    payload["files"][0]["fileUrl"] = file_url
+
+    adapter, _ = adapter_returning(payload)
+
+    with pytest.raises(PeerTubeNoSupportedSourceError):
+        await adapter.resolve(WITHOUT_HLS_WATCH)
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_file_url_never_falls_back_to_the_download_endpoint():
+    payload = load_fixture("peertube_video_without_hls.json")
+    payload["files"][0]["fileUrl"] = "javascript:alert(1)"
+
+    adapter, _ = adapter_returning(payload)
+
+    with pytest.raises(PeerTubeNoSupportedSourceError):
+        await adapter.resolve(WITHOUT_HLS_WATCH)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "files",
+    [
+        pytest.param([], id="empty-list"),
+        pytest.param(None, id="null"),
+        pytest.param({}, id="not-a-list"),
+        pytest.param(["not an object"], id="entries-not-objects"),
+    ],
+)
+async def test_an_unusable_files_value_leaves_the_video_without_a_source(files):
+    payload = load_fixture("peertube_video_without_hls.json")
+    payload["files"] = files
+
+    adapter, _ = adapter_returning(payload)
+
+    with pytest.raises(PeerTubeNoSupportedSourceError):
+        await adapter.resolve(WITHOUT_HLS_WATCH)
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_playlist_still_yields_the_progressive_files():
+    """A broken playlist is not a reason to ignore a working MP4."""
+    payload = load_fixture("peertube_video.json")
+    payload["streamingPlaylists"][0]["playlistUrl"] = "javascript:alert(1)"
+    payload["files"] = variants_payload()["files"]
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WATCH_SHORT)
+
+    assert [source.source_type for source in media.sources] == ["HTTP", "HTTP", "HTTP"]
+
+
+@pytest.mark.asyncio
+async def test_two_resolutions_do_not_share_one_header_dict():
+    adapter, _ = adapter_returning(variants_payload())
+
+    media = await adapter.resolve(VARIANTS_WATCH)
+    media.sources[0].headers["Referer"] = "https://example.invalid/"
+
+    assert media.sources[1].headers == {}

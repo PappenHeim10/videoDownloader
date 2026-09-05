@@ -1,0 +1,73 @@
+{
+  "uuid": "9d3c1f52-4e88-4a1b-b8f2-7c1d0a4e5b60",
+  "shortUUID": "aB3dEfGhJkLmNpQrStUvWx",
+  "name": "A video transcoded to several progressive resolutions",
+  "downloadEnabled": true,
+  "isLive": false,
+  "streamingPlaylists": [],
+  "files": [
+    {
+      "id": 900001,
+      "resolution": {
+        "id": 0,
+        "label": "Audio only"
+      },
+      "width": 0,
+      "height": 0,
+      "size": 4200000,
+      "fileUrl": "https://video.example/object-storage/web_videos/9d3c1f52-0.mp4",
+      "fileDownloadUrl": "https://video.example/download/web-videos/9d3c1f52-0.mp4",
+      "hasAudio": true,
+      "hasVideo": false,
+      "storage": 1
+    },
+    {
+      "id": 900002,
+      "resolution": {
+        "id": 480,
+        "label": "480p"
+      },
+      "width": 854,
+      "height": 480,
+      "size": 104857600,
+      "fps": 25,
+      "fileUrl": "https://video.example/object-storage/web_videos/9d3c1f52-480.mp4",
+      "fileDownloadUrl": "https://video.example/download/web-videos/9d3c1f52-480.mp4",
+      "hasAudio": true,
+      "hasVideo": true,
+      "storage": 1
+    },
+    {
+      "id": 900003,
+      "resolution": {
+        "id": 720,
+        "label": "720p"
+      },
+      "width": 1280,
+      "height": 720,
+      "size": 209715200,
+      "fps": 25,
+      "fileUrl": "https://video.example/object-storage/web_videos/9d3c1f52-720.mp4",
+      "fileDownloadUrl": "https://video.example/download/web-videos/9d3c1f52-720.mp4",
+      "hasAudio": true,
+      "hasVideo": true,
+      "storage": 1
+    },
+    {
+      "id": 900004,
+      "resolution": {
+        "id": 1080,
+        "label": "1080p"
+      },
+      "width": 1920,
+      "height": 1080,
+      "size": 419430400,
+      "fps": 25,
+      "fileUrl": "https://video.example/object-storage/web_videos/9d3c1f52-1080.mp4",
+      "fileDownloadUrl": "https://video.example/download/web-videos/9d3c1f52-1080.mp4",
+      "hasAudio": true,
+      "hasVideo": true,
+      "storage": 1
+    }
+  ]
+}

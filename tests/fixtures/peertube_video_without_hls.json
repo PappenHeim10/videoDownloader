@@ -4,5 +4,23 @@
   "name": "BCON blues + Q&A #125 | Blender.Today LIVE",
   "downloadEnabled": true,
   "isLive": false,
-  "streamingPlaylists": []
+  "streamingPlaylists": [],
+  "files": [
+    {
+      "id": 571282,
+      "resolution": {
+        "id": 720,
+        "label": "720p"
+      },
+      "width": 1280,
+      "height": 720,
+      "size": 382672246,
+      "fps": 30,
+      "fileUrl": "https://video.blender.org/object-storage/web_videos/6f2c86d1-25c1-4f4f-a83e-66dc96be83ee-720.mp4",
+      "fileDownloadUrl": "https://video.blender.org/download/web-videos/6f2c86d1-25c1-4f4f-a83e-66dc96be83ee-720.mp4",
+      "hasAudio": true,
+      "hasVideo": true,
+      "storage": 1
+    }
+  ]
 }

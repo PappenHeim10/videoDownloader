@@ -20,13 +20,25 @@ decide the shape of this file:
   federation exists for, so a relative value is resolved against the origin only
   as a fallback and an absolute one is never rewritten.
 
-Playlist and segments are served from object storage, outside the API's rate
-limiter and without auth, cookie or referer - verified with a header-free
-request from a cold client - so the source carries no headers.
+* **Not every video has HLS.** The sample URL the handover named
+  (``/w/eJeLCkQyxvK1joGAaBf5PY``) answers with ``streamingPlaylists: []`` and one
+  progressive MP4 in ``files[]``, and the instance's own player streams that
+  file. So both are published as sources here; which one is downloaded, and at
+  which quality, is decided by the application, not by this adapter.
+
+Progressive entries use ``fileUrl`` and never ``fileDownloadUrl``: the download
+endpoint exists to make a browser save a file - ``Content-Disposition``, on some
+instances a redirect chain and a rate limit - while ``fileUrl`` is the
+object-storage URL the player streams from.
+
+Playlist, segments and progressive files are all served from object storage,
+outside the API's rate limiter and without auth, cookie or referer - verified
+with a header-free request from a cold client - so no source carries headers.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -34,6 +46,8 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from base_api.models import Media, MediaSource
 from base_api.modules.errors import UnsupportedURLError
 from curl_cffi.requests import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 #: `VideoStreamingPlaylistType.HLS` in PeerTube's own enum. The API also returns
 #: other playlist kinds, so the entry is selected by this value rather than by
@@ -69,6 +83,17 @@ class PeerTubeExtractionError(PeerTubeError):
     carry the fields this adapter needs. Always raised `from` the original
     exception, so the cause survives without a `KeyError` or a JSON error
     reaching the caller.
+    """
+
+
+class PeerTubeNoSupportedSourceError(PeerTubeExtractionError):
+    """The answer was readable, but nothing in it is downloadable.
+
+    Its own type because the two ways to get here need telling apart in a log:
+    an instance that published only an audio rendition, and an instance whose
+    playlist and files are all unusable. A subclass of the extraction error
+    rather than a sibling, so that every caller which already treats "this
+    video yielded no source" as an extraction failure keeps working unchanged.
     """
 
 
@@ -142,7 +167,14 @@ class PeerTubeAdapter:
         return _watch_video_id(url) is not None
 
     async def resolve(self, url: str) -> Media:
-        """Resolve a watch URL into `Media` with a single HLS source."""
+        """Resolve a watch URL into `Media` with every source it offers.
+
+        Both transports are published when the instance has both, and the
+        choice between them is not made here: which one gets downloaded, and at
+        which quality, is a decision the application makes from the `Media`
+        alone. This keeps the adapter a translator - PeerTube's answer into
+        provider-neutral sources - with no opinion about transports.
+        """
         video_id = _watch_video_id(url)
         if video_id is None:
             raise UnsupportedURLError(f"Not a supported PeerTube watch URL: {url}")
@@ -176,14 +208,10 @@ class PeerTubeAdapter:
                 f"{api_url} carries no usable 'name' for {url}"
             )
 
+        sources: list[MediaSource] = []
         playlist_url = self._hls_playlist_url(payload, origin, api_url)
-
-        return Media(
-            provider="peertube",
-            original_url=url,
-            title=title,
-            provider_id=video_id,
-            sources=[
+        if playlist_url is not None:
+            sources.append(
                 MediaSource(
                     url=playlist_url,
                     source_type="HLS",
@@ -192,7 +220,23 @@ class PeerTubeAdapter:
                     # referer, cookie or token at all.
                     headers={},
                 )
-            ],
+            )
+        sources.extend(self._progressive_sources(payload, api_url))
+
+        if not sources:
+            raise PeerTubeNoSupportedSourceError(
+                f"{api_url} offers no downloadable source for {url}: no HLS playlist "
+                f"and no progressive video file among "
+                f"{len(payload.get('files') or []) if isinstance(payload.get('files'), list) else 0} "
+                f"'files' entries"
+            )
+
+        return Media(
+            provider="peertube",
+            original_url=url,
+            title=title,
+            provider_id=video_id,
+            sources=sources,
         )
 
     async def close(self) -> None:
@@ -242,15 +286,19 @@ class PeerTubeAdapter:
             ) from exc
 
     @staticmethod
-    def _hls_playlist_url(payload: dict, origin: str, api_url: str) -> str:
-        """Pick the HLS entry's playlist URL out of an already-decoded body."""
+    def _hls_playlist_url(payload: dict, origin: str, api_url: str) -> Optional[str]:
+        """The HLS entry's playlist URL, or `None` if there is no usable one.
+
+        `None` rather than an exception since progressive files exist: a video
+        whose `streamingPlaylists` is empty - which is what the sample URL
+        actually returns - still has a downloadable MP4, and the decision that
+        nothing is downloadable belongs to `resolve()`, which can see both.
+        """
         playlists = payload.get("streamingPlaylists")
         if not isinstance(playlists, list):
-            raise PeerTubeExtractionError(
-                f"{api_url} carries no 'streamingPlaylists' list"
-            )
+            logger.debug("%s carries no 'streamingPlaylists' list", api_url)
+            return None
 
-        saw_hls_entry = False
         for entry in playlists:
             if not isinstance(entry, dict):
                 continue
@@ -258,10 +306,10 @@ class PeerTubeAdapter:
             # `True == 1` in Python, so a boolean is rejected before comparing.
             if isinstance(kind, bool) or kind != HLS_PLAYLIST_TYPE:
                 continue
-            saw_hls_entry = True
 
             raw = entry.get("playlistUrl")
             if not isinstance(raw, str) or not raw.strip():
+                logger.debug("The HLS entry from %s carries no usable 'playlistUrl'", api_url)
                 continue
 
             # Absolute values - the only kind measured, and the only kind that
@@ -269,13 +317,138 @@ class PeerTubeAdapter:
             # untouched. A relative one resolves against the instance root.
             resolved = urljoin(origin, raw.strip())
             if urlsplit(resolved).scheme not in _SCHEMES:
+                logger.debug("The HLS playlist URL from %s has an unusable scheme", api_url)
                 continue
             return resolved
 
-        if saw_hls_entry:
-            raise PeerTubeExtractionError(
-                f"The HLS entry from {api_url} carries no usable 'playlistUrl'"
-            )
-        raise PeerTubeExtractionError(
-            f"{api_url} offers no HLS playlist (type {HLS_PLAYLIST_TYPE})"
+        return None
+
+    @staticmethod
+    def _stated_int(value: Any) -> Optional[int]:
+        """The integer PeerTube stated, or `None` when it stated none.
+
+        Zero is a value, not an absence - `resolution.id == 0` is how PeerTube
+        marks an audio-only file - so the two cases have to stay tellable
+        apart. Booleans are not integers here, whatever Python thinks.
+        """
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
+    @staticmethod
+    def _progressive_url(entry: dict) -> Optional[str]:
+        """The `fileUrl` of one entry, if this transport may fetch it.
+
+        `fileUrl` and never `fileDownloadUrl`: the download endpoint exists to
+        push a browser into saving a file - it answers with a
+        `Content-Disposition` and, on some instances, a redirect chain and a
+        rate limit that the object-storage URL does not have. `fileUrl` is what
+        the instance's own player streams from, and it is the one measured to
+        need no header at all.
+
+        Absolute only. A relative `fileUrl` is not something PeerTube produces,
+        and resolving one against the watch origin would be a guess about a
+        federated video's real host - exactly the mistake the playlist handling
+        above exists to avoid.
+        """
+        raw = entry.get("fileUrl")
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        candidate = raw.strip()
+        try:
+            parts = urlsplit(candidate)
+            scheme = (parts.scheme or "").lower()
+            username, password, hostname = parts.username, parts.password, parts.hostname
+        except ValueError:
+            return None
+
+        if scheme not in _SCHEMES or not hostname:
+            return None
+        if username is not None or password is not None:
+            # A URL carrying credentials would be logged, persisted into the
+            # resume state and replayed on every retry.
+            return None
+        return candidate
+
+    @classmethod
+    def _progressive_source(cls, entry: dict, api_url: str) -> Optional[MediaSource]:
+        """Map one `files[]` entry to an HTTP source, or drop it with a reason.
+
+        An entry is dropped only when PeerTube *says* it is not a video:
+        `hasVideo` explicitly false, a resolution id of 0, or a height of 0.
+        Fields that are simply absent never disqualify anything - `hasVideo`,
+        `width` and `height` are all newer than the endpoint and are missing on
+        older instances and on federated answers, and treating "not stated" as
+        "not a video" would make those videos undownloadable.
+
+        `hasAudio` is never looked at. A silent video is a video.
+        """
+        if entry.get("hasVideo") is False:
+            logger.debug("%s: dropping a files[] entry marked hasVideo=false", api_url)
+            return None
+
+        raw_resolution = entry.get("resolution")
+        resolution = raw_resolution if isinstance(raw_resolution, dict) else {}
+        resolution_id = cls._stated_int(resolution.get("id"))
+        height = cls._stated_int(entry.get("height"))
+
+        if resolution_id == 0:
+            # PeerTube's own marker for an audio-only rendition.
+            logger.debug("%s: dropping a files[] entry with resolution.id 0", api_url)
+            return None
+        if height == 0:
+            logger.debug("%s: dropping a files[] entry with height 0", api_url)
+            return None
+
+        url = cls._progressive_url(entry)
+        if url is None:
+            logger.debug("%s: dropping a files[] entry without a usable fileUrl", api_url)
+            return None
+
+        # The numeric tier is PeerTube's own ranking value, with height as the
+        # fallback when an older instance states no resolution id. It is never
+        # derived from the label or from width x height: a portrait video is
+        # `resolution.id = 1920` labelled "1080p", and re-deriving either from
+        # the other would silently pick the wrong file.
+        if resolution_id is not None and resolution_id > 0:
+            quality_value = resolution_id
+        elif height is not None and height > 0:
+            quality_value = height
+        else:
+            quality_value = None
+
+        raw_label = resolution.get("label")
+        quality_label = (
+            raw_label if isinstance(raw_label, str) and raw_label.strip() else None
         )
+
+        size = cls._stated_int(entry.get("size"))
+        return MediaSource(
+            url=url,
+            source_type="HTTP",
+            # Measured on video.blender.org: the object-storage URL answers a
+            # request from a cold client that carries no referer, cookie or
+            # token. Inventing one would be a guess, and a wrong guess here
+            # looks exactly like a broken video.
+            headers={},
+            expected_size=size if size and size > 0 else None,
+            quality_value=quality_value,
+            # Verbatim. The comparison that uses it normalizes case and
+            # surrounding whitespace; the stored value stays the instance's own.
+            quality_label=quality_label,
+        )
+
+    @classmethod
+    def _progressive_sources(cls, payload: dict, api_url: str) -> list[MediaSource]:
+        """Every downloadable progressive file, in the order the API listed them."""
+        entries = payload.get("files")
+        if not isinstance(entries, list):
+            return []
+        sources = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            source = cls._progressive_source(entry, api_url)
+            if source is not None:
+                sources.append(source)
+        return sources
