@@ -11,13 +11,39 @@ from PySide6.QtWidgets import (
     QMainWindow, QPushButton, QProgressBar, QVBoxLayout, QWidget,
 )
 
-from video_downloader.domain.download_job import DownloadJob, LifecycleState
+from video_downloader.domain.download_job import DownloadJob, LifecycleState, ProgressUnit
 from video_downloader.application.download_manager import DownloadManager
 from video_downloader.infrastructure.settings import AppSettings
 
 
 class JobBridge(QObject):
     changed = Signal(object)
+
+
+#: Bytes are shown in MiB - the 1024-based unit, named as such, because a
+#: number labelled "MB" that is computed with 1024 is the more common lie.
+_BYTES_PER_MIB = 1024 * 1024
+
+
+def progress_details(job: DownloadJob) -> str:
+    """The counters, in the words of whatever unit the job is counting in.
+
+    A progressive download whose total is still unknown says how much has
+    arrived and nothing about how much is left - "0 von 0" and a frozen
+    percentage would both be claims we cannot make.
+    """
+    if job.progress_unit is ProgressUnit.BYTES:
+        if not job.total_segments and not job.downloaded_segments:
+            return ""
+        done = job.downloaded_segments / _BYTES_PER_MIB
+        if not job.total_segments:
+            return f"{done:.1f} MiB"
+        return f"{done:.1f} / {job.total_segments / _BYTES_PER_MIB:.1f} MiB"
+    return (
+        f"{job.downloaded_segments} / {job.total_segments} Segmente"
+        if job.total_segments
+        else ""
+    )
 
 
 class DownloadItem(QFrame):
@@ -54,9 +80,15 @@ class DownloadItem(QFrame):
 
     def refresh(self, job: DownloadJob):
         self.title.setText(job.title or job.url or "Vorhandene Datei")
-        details = f"{job.downloaded_segments} / {job.total_segments} Segmente" if job.total_segments else ""
-        self.status.setText(f"{job.state.value} {details}".strip())
-        self.progress.setValue(round(job.progress))
+        self.status.setText(f"{job.state.value} {progress_details(job)}".strip())
+        if job.state == LifecycleState.DOWNLOADING and not job.has_known_total:
+            # A server that states no length gives a total of 0 for the whole
+            # run. Qt's own indeterminate mode says "running, end unknown"; a
+            # bar parked at 0 % would claim we know it has not started.
+            self.progress.setRange(0, 0)
+        else:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(round(job.progress))
         self.status.setToolTip(job.error or "")
 
 
