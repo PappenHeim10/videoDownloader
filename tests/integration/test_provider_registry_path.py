@@ -41,6 +41,7 @@ from video_downloader.application.provider_session import (
 )
 from video_downloader.bootstrap import create_job_runner, create_provider_session
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
+from video_downloader.infrastructure.event_loop import new_event_loop
 
 XHAMSTER_URL = "https://xhamster.com/videos/example-1"
 DIRECT_URL = "https://cdn.example/live/master.m3u8"
@@ -468,7 +469,7 @@ def test_the_production_registry_registers_both_adapters():
         registered = {type(p).__name__ for p in session.registry._providers}
         assert registered == {"XHamsterAdapter", "DirectMediaAdapter"}
     finally:
-        asyncio.run(session.close())
+        asyncio.run(session.close(), loop_factory=new_event_loop)
 
 
 def test_the_download_core_is_provider_clean_and_ownership_is_split():
@@ -493,7 +494,7 @@ def test_the_download_core_is_provider_clean_and_ownership_is_split():
         assert "referer" in extraction_headers
         assert session.core.session is None
     finally:
-        asyncio.run(session.close())
+        asyncio.run(session.close(), loop_factory=new_event_loop)
 
 
 @pytest.mark.asyncio

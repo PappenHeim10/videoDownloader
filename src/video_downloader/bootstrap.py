@@ -13,7 +13,7 @@ from typing import Callable
 from base_api import BaseCore, DirectMediaAdapter, ProviderRegistry
 from base_api.modules.config import RuntimeConfig
 from PySide6.QtWidgets import QApplication
-from qasync import QEventLoop
+from qasync import QSelectorEventLoop
 from xhamster_api import XHamsterAdapter
 
 from video_downloader.application.download_manager import DownloadManager
@@ -90,6 +90,25 @@ def create_job_runner(
     a job, and never learns that providers exist.
     """
     return partial(run_download_job, session_factory=session_factory)
+
+
+def create_qt_event_loop(application: QApplication) -> QSelectorEventLoop:
+    """The Qt-driven asyncio loop the GUI runs on.
+
+    Not `qasync.QEventLoop`, and deliberately so. On Windows that name resolves
+    to `QIOCPEventLoop`, an `asyncio.ProactorEventLoop` subclass with no
+    `add_reader`/`add_writer` - and curl_cffi drives libcurl through exactly
+    those, so on the IOCP loop it answers by bolting a bridging selector thread
+    onto the loop and sending every socket-readiness event across it. That
+    bridge sits on the path every HLS segment travels. `QSelectorEventLoop`
+    offers the interface curl_cffi asks for, so the bridge is never built.
+
+    Off Windows the two names are the same class, so this is a Windows fix that
+    changes nothing elsewhere. The CLI reaches the same loop kind through
+    `infrastructure.event_loop.new_event_loop`.
+    """
+    return QSelectorEventLoop(application)
+
 
 class WatchdogThread(threading.Thread):
     def __init__(self, loop, timeout=2.0):
@@ -208,7 +227,7 @@ def run_application(*, debug: bool = False, smoke_test: bool = False) -> int:
         print(SMOKE_MARKER, flush=True)
         return 0
         
-    loop = QEventLoop(application)
+    loop = create_qt_event_loop(application)
     asyncio.set_event_loop(loop)
     
     if loop_debug_enabled:
