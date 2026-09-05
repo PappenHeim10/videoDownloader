@@ -17,6 +17,10 @@ __pycache__/
 .venv/
 .pytest_cache/
 
+# Windows creates this next to the repo when Game Bar records the screen.
+# Not ours, but it shows up as untracked noise in every status.
+Captures/
+
 # generated PyInstaller specs; the maintained ones under packaging/ are tracked
 *.spec
 !packaging/pyinstaller/*.spec

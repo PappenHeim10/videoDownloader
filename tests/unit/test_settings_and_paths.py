@@ -64,7 +64,10 @@ def test_configured_download_directory_survives_a_working_directory_change(tmp_p
     monkeypatch.chdir(other)
     second = AppSettings().get_download_directory()
 
-    assert first == second == videos.resolve()
+    # Each reading is checked against the configured path in its own right, so a
+    # failure names the working directory that broke the resolution.
+    assert first == videos.resolve()
+    assert second == videos.resolve()
 
 
 def test_paths_are_not_inside_the_repository(app_root):

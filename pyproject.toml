@@ -24,6 +24,8 @@ dev = [
     "pytest-qt",
     "pytest-timeout",
     "PyInstaller>=6.10",
+    # Task runner for [tool.poe.tasks]; the project itself never imports it.
+    "poethepoet>=0.24",
 ]
 
 [project.scripts]
@@ -31,6 +33,22 @@ video-downloader = "video_downloader.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Project commands, run with `poe <task>`; a bare `poe` lists them.
+# These are shortcuts, not a second entry point: every task invokes the same
+# module or script a developer would call by hand, so nothing can drift into
+# only working through the task runner.
+[tool.poe.tasks]
+run = { cmd = "python -m video_downloader", help = "GUI aus dem Quellcode starten" }
+debug = { cmd = "python debug_main.py", help = "GUI mit Debug-Logging starten (Entry Point des Debug-Builds)" }
+cli = { cmd = "python -m video_downloader.cli.console_app", help = "Konsolen-Downloader; Argumente werden durchgereicht, z. B. poe cli <URL> -q best" }
+smoke = { cmd = "python -m video_downloader --smoke-test", help = "Startpfad pruefen, ohne ein Fenster zu oeffnen" }
+# PYTHONPATH mirrors build.py: the repo root is on the path so tests/packaging
+# can import debug_main.py, and src/ deliberately is not - the tests must run
+# against the installed distribution, not against the source tree.
+test = { cmd = "pytest tests", env = { PYTHONPATH = "." }, help = "Testsuite ausfuehren" }
+build = { cmd = "python build.py dev", help = "Debug-Build nach dist/dev (Tests, PyInstaller, Smoke-Test)" }
+release = { cmd = "python build.py release", help = "Release-Build nach dist/release (immer clean)" }
 
 [tool.pytest.ini_options]
 timeout = 30
