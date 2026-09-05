@@ -23,7 +23,7 @@ def run_tests() -> bool:
     cmd = [sys.executable, "-m", "pytest", "tests"]
     
     try:
-        result = subprocess.run(cmd, env=env, check=True)
+        subprocess.run(cmd, env=env, check=True)
         return True
     except subprocess.CalledProcessError:
         print("\n[!] Tests failed! Aborting build.")
@@ -159,7 +159,7 @@ def main():
     print_header("Build Summary")
     print(f"Build Mode      : {args.mode}")
     print(f"Tests           : {tests_passed}")
-    print(f"Executable Build: Passed")
+    print("Executable Build: Passed")
     print(f"Artifact Smoke  : Passed ({ARTIFACTS[args.mode]})")
     print(f"Duration        : {duration:.2f} seconds")
     print(f"Output Location : {os.path.abspath(distpath)}")

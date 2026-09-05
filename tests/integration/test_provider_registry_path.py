@@ -290,7 +290,8 @@ async def test_a_direct_hls_url_uses_the_same_pipeline_as_a_site_url(tmp_path):
     site_config = site_sessions[0].core.configurations[0]
     direct_config = direct_sessions[0].core.configurations[0]
 
-    assert site_job.state == direct_job.state == LifecycleState.COMPLETED
+    assert site_job.state == LifecycleState.COMPLETED
+    assert direct_job.state == LifecycleState.COMPLETED
     assert direct_job.output_file == tmp_path / "master.mp4"
     # Same shape of invocation; only what the media itself carries differs.
     for field in ("quality", "remux", "start_segment", "cleanup_on_stop", "keep_segment_dir"):

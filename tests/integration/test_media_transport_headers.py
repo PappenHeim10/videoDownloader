@@ -140,7 +140,10 @@ async def test_a_headerless_source_sends_no_source_headers(tmp_path):
     job = await run_job(media, core, tmp_path)
 
     assert job.state == LifecycleState.COMPLETED
-    assert requests and all(not headers for _, headers in requests)
+    # The emptiness check is its own assertion: without it, `all()` over an empty
+    # recorder would pass and the test would prove nothing.
+    assert requests
+    assert all(not headers for _, headers in requests)
 
 
 @pytest.mark.asyncio
@@ -152,11 +155,16 @@ async def test_a_headered_job_does_not_leak_into_a_later_plain_one(tmp_path):
     job_a = await run_job(media_on("cdn.a", "With Referer", XHAMSTER_REFERER), core, tmp_path)
     job_b = await run_job(media_on("cdn.b", "Without Referer"), core, tmp_path)
 
-    assert job_a.state == job_b.state == LifecycleState.COMPLETED
+    assert job_a.state == LifecycleState.COMPLETED
+    assert job_b.state == LifecycleState.COMPLETED
+
     a_headers = [headers for url, headers in requests if "cdn.a" in url]
     b_headers = [headers for url, headers in requests if "cdn.b" in url]
-    assert a_headers and all(headers == XHAMSTER_REFERER for headers in a_headers)
-    assert b_headers and all(not headers for headers in b_headers)
+
+    assert a_headers
+    assert all(headers == XHAMSTER_REFERER for headers in a_headers)
+    assert b_headers
+    assert all(not headers for headers in b_headers)
 
 
 @pytest.mark.asyncio
@@ -170,7 +178,9 @@ async def test_two_concurrent_jobs_keep_their_own_transport_headers(tmp_path):
         run_job(media_on("cdn.b", "Job B", referer_b), core, tmp_path),
     )
 
-    assert job_a.state == job_b.state == LifecycleState.COMPLETED
+    assert job_a.state == LifecycleState.COMPLETED
+    assert job_b.state == LifecycleState.COMPLETED
+
     for url, headers in requests:
         expected = XHAMSTER_REFERER if "cdn.a" in url else referer_b
         assert headers == expected, f"{url} carried {headers}"
