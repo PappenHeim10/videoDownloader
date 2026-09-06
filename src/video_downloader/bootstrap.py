@@ -22,7 +22,7 @@ from video_downloader.application.provider_session import ProviderSession
 from video_downloader.domain.download_job import DownloadJob
 from video_downloader.infrastructure.paths import AppPaths
 from video_downloader.infrastructure.settings import AppSettings
-from video_downloader.providers import PeerTubeAdapter
+from video_downloader.providers import PeerTubeAdapter, YouTubeAdapter
 from video_downloader.ui.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,7 @@ def create_provider_session() -> ProviderSession:
     registry = ProviderRegistry()
     registry.register(XHamsterAdapter())
     registry.register(PeerTubeAdapter())
+    registry.register(YouTubeAdapter())
     registry.register(DirectMediaAdapter())
     return ProviderSession(registry=registry, core=core)
 
