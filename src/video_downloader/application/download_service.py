@@ -22,6 +22,22 @@ from video_downloader.application.provider_session import (
     ProviderNotConfiguredError,
     ProviderSession,
 )
+# The quality rule lives with the rest of the selection policy. Re-exported here
+# because that is where callers and tests have always imported it from.
+from video_downloader.application.track_download import (
+    LARGE_DOWNLOAD_BYTES,
+    container_for,
+    YTDLP_TRANSPORT,
+    DownloadTooLargeError,
+    download_selection,
+    estimate_bytes,
+)
+from video_downloader.application.track_selection import (  # noqa: F401
+    QUALITY_PREFERENCES,
+    TrackSelection,
+    select_progressive_source,
+    select_tracks,
+)
 from video_downloader.domain.download_job import DownloadJob, LifecycleState, ProgressUnit
 
 logger = logging.getLogger(__name__)
@@ -56,124 +72,24 @@ def _ensure_async_stop_event(job: DownloadJob) -> None:
 #: publishes the progressive file as a convenience and the playlist as the
 #: thing its own player uses, and the playlist is the one with per-segment
 #: retries and byte-range support behind it.
-SUPPORTED_SOURCE_TYPES = ("HLS", "HTTP")
-
-#: The three orderings that name a position in the list rather than a tier.
-QUALITY_PREFERENCES = frozenset({"best", "worst", "half"})
-
-#: "1080", "1080p", "1080P" - a number with an optional trailing p, nothing else.
-_NUMERIC_QUALITY = re.compile(r"\A(\d+)[pP]?\Z")
+SUPPORTED_SOURCE_TYPES = ("HLS", "HTTP", YTDLP_TRANSPORT)
 
 
-def _numeric_quality(value: str) -> int | None:
-    match = _NUMERIC_QUALITY.match(value.strip())
-    return int(match.group(1)) if match else None
+def output_extension(source: MediaSource) -> str:
+    """The extension that names what will actually be on disk.
 
+    A file called `.mp4` that is WebM inside is a lie the user only discovers in
+    a player, so the name follows the container rather than a convention.
 
-def _order_key(source: MediaSource) -> tuple[int, int, int, str]:
-    """Rank one progressive source, worst first.
-
-    The numeric tier is whatever the provider ranks by (`quality_value`), never
-    a dimension re-derived from a label or a URL - a portrait video's label and
-    its tier legitimately disagree, and only the provider knows which is which.
-
-    Sources without a numeric tier sort below every source that has one and are
-    ordered among themselves by size, so "best" cannot pick an entry whose
-    quality nobody stated over a stated 1080p. The remaining two components are
-    tie-breakers that exist purely so the choice is reproducible: the larger
-    file first (same resolution, more bits), then the URL.
+    Two cases keep their historical `.mp4`, and both are correct rather than
+    grandfathered: an HLS download is remuxed into MP4 whatever its segments
+    were, and a source whose provider states no container is one this
+    application has no better answer for than the format it has always written.
     """
-    numeric = source.quality_value
-    return (
-        0 if numeric is None else 1,
-        numeric or 0,
-        source.expected_size or 0,
-        source.url,
-    )
-
-
-def _select_by_number(ordered: list[MediaSource], target: int) -> MediaSource:
-    """Exact numeric tier, else the next smaller one, else the smallest."""
-    numeric = [source for source in ordered if source.quality_value is not None]
-    if not numeric:
-        return ordered[0]
-
-    exact = [source for source in numeric if source.quality_value == target]
-    if exact:
-        # Already ordered, so the last one is the best-ranked of the ties.
-        return exact[-1]
-
-    smaller = [source for source in numeric if cast(int, source.quality_value) < target]
-    if smaller:
-        # Downwards, never upwards: a user asking for 720 on a connection that
-        # suits 720 should not silently receive 2160.
-        return smaller[-1]
-    return numeric[0]
-
-
-def select_progressive_source(
-    sources: Sequence[MediaSource], quality: str | int
-) -> MediaSource:
-    """Pick one progressive source for `quality`. No requests, no guessing.
-
-    The semantics differ by the *type* of what is asked for, and deliberately
-    so - nothing is coerced from one into the other:
-
-    * `"best"` / `"worst"` / `"half"` (case-insensitive) name a position in the
-      ranked list and use the numeric tier only.
-    * a **string** is first matched against the provider's own quality label,
-      compared exactly apart from case and surrounding whitespace. This is what
-      makes `"1080p"` find a portrait video the provider labels `"1080p"` and
-      ranks as 1920 - the label is the provider's word for it.
-    * an **integer** never matches a label. `1080` is a tier, `"1080p"` is a
-      name, and the two can point at different files on the same video; making
-      the integer fall back to label matching would make that difference depend
-      on how a caller happened to spell its argument.
-
-    Both spellings then fall through to the same numeric rule: exact tier, else
-    the next smaller tier, else the smallest video available. The distinction is
-    about what *matches*, never about what is ultimately returned - with nothing
-    smaller to fall back to, the last rule can hand an integer request the very
-    file its label would have matched. Two spellings agreeing on a result is not
-    evidence that they took the same route to it.
-
-    A string that is neither a preference, nor a label, nor a number cannot be
-    interpreted - the best available source is used rather than failing the
-    download, because "I do not understand this quality" is not a reason to
-    have no video at all.
-    """
-    ordered = sorted(sources, key=_order_key)
-    if not ordered:
-        raise UnsupportedProtocolError("No progressive source to choose from.")
-
-    if isinstance(quality, str):
-        wanted = quality.strip().casefold()
-        if wanted in QUALITY_PREFERENCES:
-            if wanted == "worst":
-                return ordered[0]
-            if wanted == "half":
-                return ordered[len(ordered) // 2]
-            return ordered[-1]
-
-        labelled = [
-            source
-            for source in ordered
-            if source.quality_label is not None
-            and source.quality_label.strip().casefold() == wanted
-        ]
-        if labelled:
-            return labelled[-1]
-
-        target = _numeric_quality(quality)
-        if target is None:
-            logger.warning(
-                "Quality %r matches no label and is not a number; using the best source.",
-                quality,
-            )
-            return ordered[-1]
-        return _select_by_number(ordered, target)
-
-    return _select_by_number(ordered, int(quality))
+    if source.source_type != "HTTP":
+        return ".mp4"
+    container = (source.track.container or "").strip().lower()
+    return f".{container}" if container else ".mp4"
 
 
 def select_source(media: Media, quality: str | int) -> MediaSource:
@@ -205,6 +121,36 @@ def select_source(media: Media, quality: str | int) -> MediaSource:
         f"No supported source for {getattr(media, 'original_url', '')}; "
         f"the provider offers {offered or ['nothing']} and this application "
         f"downloads {list(SUPPORTED_SOURCE_TYPES)}"
+    )
+
+
+def select_for_job(media: Media, quality: str | int) -> TrackSelection:
+    """What this job downloads: one finished file, or two tracks to combine.
+
+    A thin layer over `select_source` and `select_tracks`, and thin on purpose.
+    Every provider that offered one finished file still goes through
+    `select_source` and reaches exactly the path it always did; only a provider
+    that publishes separate tracks reaches the pairing.
+    """
+    sources = list(getattr(media, "sources", ()) or ())
+    if any(source.track.role in ("video", "audio") for source in sources):
+        return select_tracks(
+            [source for source in sources if source.source_type != "HLS"], quality
+        )
+    return TrackSelection(combined=select_source(media, quality))
+
+
+def takes_single_source_path(selection: TrackSelection) -> bool:
+    """Whether this job is one the engine downloads on its own, as it always has.
+
+    True for every source the engine has a transport for: an HLS playlist and a
+    progressive HTTP file. False for a pair that has to be muxed, and for a
+    source whose bytes the resolver fetches - neither is something
+    `BaseCore.download` has ever been handed.
+    """
+    return (
+        selection.combined is not None
+        and selection.combined.source_type in ("HLS", "HTTP")
     )
 
 
@@ -249,6 +195,51 @@ def build_download_config(
             state_path=state_path,
         )
     raise UnsupportedProtocolError(f"Unsupported source type: {source.source_type!r}")
+
+
+
+def _extension_for(selection: TrackSelection) -> str:
+    """The extension for whatever this selection will leave on disk."""
+    if takes_single_source_path(selection):
+        return output_extension(selection.combined)
+    return container_for(selection).extension
+
+
+def _confirm_size(job: DownloadJob) -> None:
+    """Ask before a large download, when there is anybody to ask.
+
+    A 2160p60 track measured 1.4 GB, so "one click and a gigabyte" is a real
+    sequence rather than a hypothetical one. With no confirmer attached - a CLI,
+    a test - the download proceeds and the size is logged, because refusing on
+    a caller's behalf would be worse than telling them afterwards.
+    """
+    estimate = job.expected_bytes
+    if estimate is None or estimate < LARGE_DOWNLOAD_BYTES:
+        return
+    gib = estimate / 1024**3
+    if job.confirm_large_download is None:
+        logger.warning("[JOB %s] Large download: about %.1f GiB.", job.id, gib)
+        return
+    if not job.confirm_large_download(job, estimate):
+        raise DownloadTooLargeError(
+            f"Der Download ist ca. {gib:.1f} GiB gross und wurde abgebrochen."
+        )
+
+
+def _clear_work_dir(job: DownloadJob) -> None:
+    """Remove the per-job track directory once the finished file is in place."""
+    work_dir = job.state_file.parent / job.id
+    if not work_dir.is_dir():
+        return
+    for path in sorted(work_dir.iterdir()):
+        try:
+            path.unlink()
+        except OSError as error:
+            logger.debug("[JOB %s] Could not remove %s: %s", job.id, path.name, error)
+    try:
+        work_dir.rmdir()
+    except OSError as error:
+        logger.debug("[JOB %s] Could not remove the work directory: %s", job.id, error)
 
 
 def _create_progress_callback(job: DownloadJob) -> Callable[[int, int], None]:
@@ -341,41 +332,73 @@ async def run_download_job(
         logger.info("[JOB %s] resolve finished, provider=%s", job.id, getattr(media, "provider", "unknown"))
 
         job.title = getattr(media, "title", None) or job.url
+        selection = select_for_job(media, job.quality)
         # job.title stays the display title the UI shows. Only the filesystem
         # component is sanitized - through the same function the provider used to
         # apply inside its own download(). The sanitized path is now handed to the
         # engine verbatim, so the path we record and the file that lands on disk
         # are one string rather than two derivations that have to agree.
-        job.output_file = job.output_dir / f"{strip_title(job.title)}.mp4"
-        source = select_source(media, job.quality)
-        # The unit is set before the first callback can arrive, so no progress
-        # is ever recorded under the wrong label.
-        job.progress_unit = (
-            ProgressUnit.BYTES if source.source_type == "HTTP" else ProgressUnit.SEGMENTS
+        #
+        # The name is built after the selection, because the extension is a
+        # property of the chosen file rather than of the video.
+        job.output_file = job.output_dir / (
+            strip_title(job.title) + _extension_for(selection)
         )
-        job.transition(LifecycleState.DOWNLOADING)
+        job.expected_bytes = estimate_bytes(selection)
+        _confirm_size(job)
         _ensure_async_stop_event(job)
-
         callback = _create_progress_callback(job)
 
-        real_remux = job.remux if job.remux is not None else remux
-        configuration = build_download_config(
-            source,
-            quality=job.quality,
-            path=str(job.output_file),
-            callback=callback,
-            stop_event=job.stop_event,
-            state_path=str(job.state_file),
-            remux=real_remux,
-        )
-        logger.info(
-            "[JOB %s] core.download start (transport=%s remux=%s)",
-            job.id, source.source_type, real_remux,
-        )
-        result = await session.core.download(configuration)
-        logger.info("[JOB %s] core.download finished. Result: %s", job.id, result)
+        if takes_single_source_path(selection):
+            source = selection.combined
+            # The unit is set before the first callback can arrive, so no
+            # progress is ever recorded under the wrong label.
+            job.progress_unit = (
+                ProgressUnit.BYTES if source.source_type == "HTTP" else ProgressUnit.SEGMENTS
+            )
+            job.transition(LifecycleState.DOWNLOADING)
 
-        _handle_download_result(job, result)
+            real_remux = job.remux if job.remux is not None else remux
+            configuration = build_download_config(
+                source,
+                quality=job.quality,
+                path=str(job.output_file),
+                callback=callback,
+                stop_event=job.stop_event,
+                state_path=str(job.state_file),
+                remux=real_remux,
+            )
+            logger.info(
+                "[JOB %s] core.download start (transport=%s remux=%s)",
+                job.id, source.source_type, real_remux,
+            )
+            result = await session.core.download(configuration)
+            logger.info("[JOB %s] core.download finished. Result: %s", job.id, result)
+            _handle_download_result(job, result)
+        else:
+            job.progress_unit = ProgressUnit.BYTES
+            job.transition(LifecycleState.DOWNLOADING)
+            logger.info(
+                "[JOB %s] track download start (%s)",
+                job.id,
+                ", ".join(
+                    f"{s.track.role or '?'}:{s.source_type}" for s in selection.sources
+                ),
+            )
+            produced = await download_selection(
+                selection,
+                core=session.core,
+                target=job.output_file,
+                work_dir=job.state_file.parent / job.id,
+                stop_event=job.stop_event,
+                report=callback,
+                on_muxing=lambda: job.transition(LifecycleState.MUXING),
+            )
+            # `None` means the stop event ended it - the same signal the engine
+            # gives with `False`, and handled by the same code.
+            _handle_download_result(job, produced is not None)
+            if produced is not None:
+                _clear_work_dir(job)
 
     except asyncio.CancelledError:
         logger.info("[JOB %s] CancelledError caught", job.id)

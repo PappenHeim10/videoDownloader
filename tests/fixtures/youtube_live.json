@@ -1,0 +1,64 @@
+{
+ "duration": null,
+ "formats": [
+  {
+   "acodec": null,
+   "ext": "mp4",
+   "format_id": "233",
+   "format_note": "Default, low",
+   "protocol": "m3u8_native",
+   "url": "https://media.test/live/233.mp4",
+   "vcodec": "none"
+  },
+  {
+   "acodec": null,
+   "ext": "mp4",
+   "format_id": "234",
+   "format_note": "Default, high",
+   "protocol": "m3u8_native",
+   "url": "https://media.test/live/234.mp4",
+   "vcodec": "none"
+  },
+  {
+   "acodec": "none",
+   "ext": "mp4",
+   "format_id": "269",
+   "format_note": null,
+   "protocol": "m3u8_native",
+   "url": "https://media.test/live/269.mp4",
+   "vcodec": "avc1.42C00B"
+  },
+  {
+   "acodec": "none",
+   "ext": "mp4",
+   "format_id": "229",
+   "format_note": null,
+   "protocol": "m3u8_native",
+   "url": "https://media.test/live/229.mp4",
+   "vcodec": "avc1.4D4015"
+  },
+  {
+   "acodec": "none",
+   "ext": "mp4",
+   "format_id": "230",
+   "format_note": null,
+   "protocol": "m3u8_native",
+   "url": "https://media.test/live/230.mp4",
+   "vcodec": "avc1.4D401E"
+  },
+  {
+   "acodec": "none",
+   "ext": "mp4",
+   "format_id": "231",
+   "format_note": null,
+   "protocol": "m3u8_native",
+   "url": "https://media.test/live/231.mp4",
+   "vcodec": "avc1.4D401F"
+  }
+ ],
+ "id": "hESFZeam7Gc",
+ "is_live": true,
+ "live_status": "is_live",
+ "title": "LIVE: NBC News NOW 2026-09-07 00:38",
+ "uploader": "NBC News"
+}

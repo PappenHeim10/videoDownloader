@@ -22,7 +22,7 @@ from video_downloader.application.provider_session import ProviderSession
 from video_downloader.domain.download_job import DownloadJob
 from video_downloader.infrastructure.paths import AppPaths
 from video_downloader.infrastructure.settings import AppSettings
-from video_downloader.providers import PeerTubeAdapter
+from video_downloader.providers import PeerTubeAdapter, YouTubeAdapter
 from video_downloader.ui.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -32,12 +32,36 @@ logger = logging.getLogger(__name__)
 #: components - which is the thing a build needs proven.
 SMOKE_MARKER = "VideoDownloader smoke OK"
 
+#: Printed by `--smoke-test` once the YouTube extractor has been reached.
+#: Separate from the marker above because it proves a different thing, and
+#: because only one of the two can fail in a frozen build.
+EXTRACTOR_MARKER = "VideoDownloader extractors OK"
+
 #: Frameworks whose DEBUG output is about their own plumbing rather than about
 #: this application. Named explicitly so raising our level never raises theirs.
 THIRD_PARTY_LOG_LEVELS = {
     "qasync": logging.WARNING,
     "asyncio": logging.WARNING,
 }
+
+
+def verify_extractors() -> None:
+    """Prove the artifact can reach the extractor it needs, not merely import it.
+
+    yt-dlp resolves extractors by name at run time, so nothing in the import
+    graph points at them. A frozen build without them imports `yt_dlp` happily
+    and then reports every YouTube URL as unsupported - a failure that exists
+    only in the artifact and never in a source run, which is exactly the kind
+    the smoke test is for.
+
+    Asked through yt-dlp's own registry rather than by importing a module path,
+    because the path has moved between releases and the registry has not.
+    """
+    from yt_dlp.extractor import get_info_extractor
+
+    extractor = get_info_extractor("Youtube")
+    if not extractor.suitable("https://www.youtube.com/watch?v=aaaaaaaaaaa"):
+        raise RuntimeError("The bundled YouTube extractor does not claim a watch URL")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -84,6 +108,7 @@ def create_provider_session() -> ProviderSession:
     registry = ProviderRegistry()
     registry.register(XHamsterAdapter())
     registry.register(PeerTubeAdapter())
+    registry.register(YouTubeAdapter())
     registry.register(DirectMediaAdapter())
     return ProviderSession(registry=registry, core=core)
 
@@ -227,6 +252,8 @@ def run_application(*, debug: bool = False, smoke_test: bool = False) -> int:
     window = MainWindow(manager, settings)
 
     if smoke_test:
+        verify_extractors()
+        print(EXTRACTOR_MARKER, flush=True)
         logger.info("Smoke test passed: Components constructed successfully")
         # Printed only in smoke mode, never during a normal start. The build reads
         # it to prove it exercised *this* artifact: an exit code alone cannot tell

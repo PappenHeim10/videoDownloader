@@ -833,3 +833,91 @@ async def test_two_resolutions_do_not_share_one_header_dict():
     media.sources[0].headers["Referer"] = "https://example.invalid/"
 
     assert media.sources[1].headers == {}
+
+
+# --- what the instance states about the media itself -----------------------
+
+
+@pytest.mark.asyncio
+async def test_a_progressive_source_carries_what_the_instance_stated():
+    payload = load_fixture("peertube_video_without_hls.json")
+    entry = payload["files"][0]
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WATCH_SHORT)
+    track = media.sources[0].track
+
+    assert track.role == "combined"
+    assert track.container == "mp4"
+    assert track.fps == entry["fps"]
+    assert track.width == entry["width"]
+    assert track.height == entry["height"]
+
+
+@pytest.mark.asyncio
+async def test_what_peertube_never_states_stays_unset():
+    """The endpoint names no codec, bitrate, language or dynamic-range variant.
+
+    Deriving any of those from the file name would read as a fact once it is in
+    the model, and a caller choosing between renditions would act on a guess.
+    """
+    adapter, _ = adapter_returning(load_fixture("peertube_video_without_hls.json"))
+    media = await adapter.resolve(WATCH_SHORT)
+    track = media.sources[0].track
+
+    assert track.video_codec is None
+    assert track.audio_codec is None
+    assert track.bitrate_bps is None
+    assert track.language is None
+    assert track.is_default_audio is None
+    assert track.is_dynamic_range_compressed is None
+    assert track.duration_ms is None
+
+
+@pytest.mark.asyncio
+async def test_an_entry_that_asserts_neither_flag_gets_no_role():
+    """An older instance states no hasVideo/hasAudio; "probably both" is a guess."""
+    payload = load_fixture("peertube_video_without_hls.json")
+    payload["files"][0].pop("hasVideo", None)
+    payload["files"][0].pop("hasAudio", None)
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WATCH_SHORT)
+
+    assert media.sources[0].track.role is None
+
+
+@pytest.mark.asyncio
+async def test_an_entry_without_fps_leaves_fps_unset_rather_than_zero():
+    payload = load_fixture("peertube_video_without_hls.json")
+    payload["files"][0].pop("fps", None)
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WATCH_SHORT)
+
+    assert media.sources[0].track.fps is None
+
+
+@pytest.mark.asyncio
+async def test_the_container_comes_from_the_path_and_ignores_a_query_string():
+    """Object storage can presign; a signature is not part of the file name."""
+    payload = load_fixture("peertube_video_without_hls.json")
+    payload["files"][0]["fileUrl"] = (
+        "https://s3.example/bucket/9d3c1f52-720.mp4"
+        "?X-Amz-Signature=DEADBEEF&X-Amz-Expires=900"
+    )
+
+    adapter, _ = adapter_returning(payload)
+    media = await adapter.resolve(WATCH_SHORT)
+
+    assert media.sources[0].track.container == "mp4"
+
+
+@pytest.mark.asyncio
+async def test_two_resolutions_do_not_share_one_track_object():
+    adapter, _ = adapter_returning(variants_payload())
+
+    media = await adapter.resolve(VARIANTS_WATCH)
+    media.sources[0].track.container = "webm"
+
+    assert media.sources[1].track.container == "mp4"

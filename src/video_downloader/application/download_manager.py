@@ -10,6 +10,12 @@ from video_downloader.application.download_service import run_download_job
 
 logger = logging.getLogger(__name__)
 
+#: What a finished download can be called on disk. `.webm` and `.mkv` joined the
+#: list when the output container stopped always being MP4: a video muxed from
+#: VP9 and Opus is a WebM, and a directory scan that did not know that would
+#: show yesterday's downloads as missing.
+FINISHED_SUFFIXES = frozenset({".mp4", ".ts", ".webm", ".mkv"})
+
 
 class DownloadManager:
     def __init__(
@@ -39,7 +45,7 @@ class DownloadManager:
     def _load_existing_files(self) -> None:
         assert self.output_dir is not None
         for path in sorted(self.output_dir.iterdir()):
-            if path.is_file() and path.suffix.lower() in {".mp4", ".ts"}:
+            if path.is_file() and path.suffix.lower() in FINISHED_SUFFIXES:
                 job = DownloadJob(url="", quality="best", output_dir=self.output_dir, title=path.name)
                 job.output_file = path
                 job.progress = 100.0
