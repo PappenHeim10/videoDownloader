@@ -64,6 +64,24 @@ def _ensure_async_stop_event(job: DownloadJob) -> None:
 #: retries and byte-range support behind it.
 SUPPORTED_SOURCE_TYPES = ("HLS", "HTTP")
 
+
+def output_extension(source: MediaSource) -> str:
+    """The extension that names what will actually be on disk.
+
+    A file called `.mp4` that is WebM inside is a lie the user only discovers in
+    a player, so the name follows the container rather than a convention.
+
+    Two cases keep their historical `.mp4`, and both are correct rather than
+    grandfathered: an HLS download is remuxed into MP4 whatever its segments
+    were, and a source whose provider states no container is one this
+    application has no better answer for than the format it has always written.
+    """
+    if source.source_type != "HTTP":
+        return ".mp4"
+    container = (source.track.container or "").strip().lower()
+    return f".{container}" if container else ".mp4"
+
+
 def select_source(media: Media, quality: str | int) -> MediaSource:
     """Pick the source this application can download, for this quality.
 
@@ -229,13 +247,18 @@ async def run_download_job(
         logger.info("[JOB %s] resolve finished, provider=%s", job.id, getattr(media, "provider", "unknown"))
 
         job.title = getattr(media, "title", None) or job.url
+        source = select_source(media, job.quality)
         # job.title stays the display title the UI shows. Only the filesystem
         # component is sanitized - through the same function the provider used to
         # apply inside its own download(). The sanitized path is now handed to the
         # engine verbatim, so the path we record and the file that lands on disk
         # are one string rather than two derivations that have to agree.
-        job.output_file = job.output_dir / f"{strip_title(job.title)}.mp4"
-        source = select_source(media, job.quality)
+        #
+        # The name is built after the source is chosen, because the extension is
+        # a property of the chosen file rather than of the video.
+        job.output_file = job.output_dir / (
+            strip_title(job.title) + output_extension(source)
+        )
         # The unit is set before the first callback can arrive, so no progress
         # is ever recorded under the wrong label.
         job.progress_unit = (
