@@ -82,7 +82,11 @@ def parse_args() -> argparse.Namespace:
 def configure_logging(paths: AppPaths | None = None) -> None:
     # Same per-user location the GUI uses, resolved through the same helper.
     log_dir = (paths or AppPaths.default()).ensure_log_dir()
-    logging.basicConfig(level=logging.INFO, filename=log_dir / "downloader-cli.log")
+    # UTF-8 explicitly, as the GUI's handler already does. Without it the file
+    # is written in the console code page, and every error message carrying an
+    # umlaut - which the provider messages do - lands in the log mangled.
+    handler = logging.FileHandler(log_dir / "downloader-cli.log", encoding="utf-8")
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
 
 
 def main() -> int:
