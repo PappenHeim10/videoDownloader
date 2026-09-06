@@ -152,7 +152,9 @@ async def test_a_video_resolves_into_tracks_with_stable_identities():
     assert media.title
     assert media.sources
     for source in media.sources:
-        assert source.source_type == "HTTP"
+        # Fetched by the resolver that produced the URL, not by the engine's
+        # transport - see the C01 gate. `source_type` names the transport.
+        assert source.source_type == "YTDLP"
         assert source.identity is not None
         assert source.identity.startswith(f"youtube:{VIDEO_ID}:")
 

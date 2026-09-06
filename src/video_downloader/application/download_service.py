@@ -24,9 +24,19 @@ from video_downloader.application.provider_session import (
 )
 # The quality rule lives with the rest of the selection policy. Re-exported here
 # because that is where callers and tests have always imported it from.
+from video_downloader.application.track_download import (
+    LARGE_DOWNLOAD_BYTES,
+    container_for,
+    YTDLP_TRANSPORT,
+    DownloadTooLargeError,
+    download_selection,
+    estimate_bytes,
+)
 from video_downloader.application.track_selection import (  # noqa: F401
     QUALITY_PREFERENCES,
+    TrackSelection,
     select_progressive_source,
+    select_tracks,
 )
 from video_downloader.domain.download_job import DownloadJob, LifecycleState, ProgressUnit
 
@@ -62,7 +72,7 @@ def _ensure_async_stop_event(job: DownloadJob) -> None:
 #: publishes the progressive file as a convenience and the playlist as the
 #: thing its own player uses, and the playlist is the one with per-segment
 #: retries and byte-range support behind it.
-SUPPORTED_SOURCE_TYPES = ("HLS", "HTTP")
+SUPPORTED_SOURCE_TYPES = ("HLS", "HTTP", YTDLP_TRANSPORT)
 
 
 def output_extension(source: MediaSource) -> str:
@@ -114,6 +124,36 @@ def select_source(media: Media, quality: str | int) -> MediaSource:
     )
 
 
+def select_for_job(media: Media, quality: str | int) -> TrackSelection:
+    """What this job downloads: one finished file, or two tracks to combine.
+
+    A thin layer over `select_source` and `select_tracks`, and thin on purpose.
+    Every provider that offered one finished file still goes through
+    `select_source` and reaches exactly the path it always did; only a provider
+    that publishes separate tracks reaches the pairing.
+    """
+    sources = list(getattr(media, "sources", ()) or ())
+    if any(source.track.role in ("video", "audio") for source in sources):
+        return select_tracks(
+            [source for source in sources if source.source_type != "HLS"], quality
+        )
+    return TrackSelection(combined=select_source(media, quality))
+
+
+def takes_single_source_path(selection: TrackSelection) -> bool:
+    """Whether this job is one the engine downloads on its own, as it always has.
+
+    True for every source the engine has a transport for: an HLS playlist and a
+    progressive HTTP file. False for a pair that has to be muxed, and for a
+    source whose bytes the resolver fetches - neither is something
+    `BaseCore.download` has ever been handed.
+    """
+    return (
+        selection.combined is not None
+        and selection.combined.source_type in ("HLS", "HTTP")
+    )
+
+
 def build_download_config(
     source: MediaSource,
     *,
@@ -155,6 +195,51 @@ def build_download_config(
             state_path=state_path,
         )
     raise UnsupportedProtocolError(f"Unsupported source type: {source.source_type!r}")
+
+
+
+def _extension_for(selection: TrackSelection) -> str:
+    """The extension for whatever this selection will leave on disk."""
+    if takes_single_source_path(selection):
+        return output_extension(selection.combined)
+    return container_for(selection).extension
+
+
+def _confirm_size(job: DownloadJob) -> None:
+    """Ask before a large download, when there is anybody to ask.
+
+    A 2160p60 track measured 1.4 GB, so "one click and a gigabyte" is a real
+    sequence rather than a hypothetical one. With no confirmer attached - a CLI,
+    a test - the download proceeds and the size is logged, because refusing on
+    a caller's behalf would be worse than telling them afterwards.
+    """
+    estimate = job.expected_bytes
+    if estimate is None or estimate < LARGE_DOWNLOAD_BYTES:
+        return
+    gib = estimate / 1024**3
+    if job.confirm_large_download is None:
+        logger.warning("[JOB %s] Large download: about %.1f GiB.", job.id, gib)
+        return
+    if not job.confirm_large_download(job, estimate):
+        raise DownloadTooLargeError(
+            f"Der Download ist ca. {gib:.1f} GiB gross und wurde abgebrochen."
+        )
+
+
+def _clear_work_dir(job: DownloadJob) -> None:
+    """Remove the per-job track directory once the finished file is in place."""
+    work_dir = job.state_file.parent / job.id
+    if not work_dir.is_dir():
+        return
+    for path in sorted(work_dir.iterdir()):
+        try:
+            path.unlink()
+        except OSError as error:
+            logger.debug("[JOB %s] Could not remove %s: %s", job.id, path.name, error)
+    try:
+        work_dir.rmdir()
+    except OSError as error:
+        logger.debug("[JOB %s] Could not remove the work directory: %s", job.id, error)
 
 
 def _create_progress_callback(job: DownloadJob) -> Callable[[int, int], None]:
@@ -247,46 +332,73 @@ async def run_download_job(
         logger.info("[JOB %s] resolve finished, provider=%s", job.id, getattr(media, "provider", "unknown"))
 
         job.title = getattr(media, "title", None) or job.url
-        source = select_source(media, job.quality)
+        selection = select_for_job(media, job.quality)
         # job.title stays the display title the UI shows. Only the filesystem
         # component is sanitized - through the same function the provider used to
         # apply inside its own download(). The sanitized path is now handed to the
         # engine verbatim, so the path we record and the file that lands on disk
         # are one string rather than two derivations that have to agree.
         #
-        # The name is built after the source is chosen, because the extension is
-        # a property of the chosen file rather than of the video.
+        # The name is built after the selection, because the extension is a
+        # property of the chosen file rather than of the video.
         job.output_file = job.output_dir / (
-            strip_title(job.title) + output_extension(source)
+            strip_title(job.title) + _extension_for(selection)
         )
-        # The unit is set before the first callback can arrive, so no progress
-        # is ever recorded under the wrong label.
-        job.progress_unit = (
-            ProgressUnit.BYTES if source.source_type == "HTTP" else ProgressUnit.SEGMENTS
-        )
-        job.transition(LifecycleState.DOWNLOADING)
+        job.expected_bytes = estimate_bytes(selection)
+        _confirm_size(job)
         _ensure_async_stop_event(job)
-
         callback = _create_progress_callback(job)
 
-        real_remux = job.remux if job.remux is not None else remux
-        configuration = build_download_config(
-            source,
-            quality=job.quality,
-            path=str(job.output_file),
-            callback=callback,
-            stop_event=job.stop_event,
-            state_path=str(job.state_file),
-            remux=real_remux,
-        )
-        logger.info(
-            "[JOB %s] core.download start (transport=%s remux=%s)",
-            job.id, source.source_type, real_remux,
-        )
-        result = await session.core.download(configuration)
-        logger.info("[JOB %s] core.download finished. Result: %s", job.id, result)
+        if takes_single_source_path(selection):
+            source = selection.combined
+            # The unit is set before the first callback can arrive, so no
+            # progress is ever recorded under the wrong label.
+            job.progress_unit = (
+                ProgressUnit.BYTES if source.source_type == "HTTP" else ProgressUnit.SEGMENTS
+            )
+            job.transition(LifecycleState.DOWNLOADING)
 
-        _handle_download_result(job, result)
+            real_remux = job.remux if job.remux is not None else remux
+            configuration = build_download_config(
+                source,
+                quality=job.quality,
+                path=str(job.output_file),
+                callback=callback,
+                stop_event=job.stop_event,
+                state_path=str(job.state_file),
+                remux=real_remux,
+            )
+            logger.info(
+                "[JOB %s] core.download start (transport=%s remux=%s)",
+                job.id, source.source_type, real_remux,
+            )
+            result = await session.core.download(configuration)
+            logger.info("[JOB %s] core.download finished. Result: %s", job.id, result)
+            _handle_download_result(job, result)
+        else:
+            job.progress_unit = ProgressUnit.BYTES
+            job.transition(LifecycleState.DOWNLOADING)
+            logger.info(
+                "[JOB %s] track download start (%s)",
+                job.id,
+                ", ".join(
+                    f"{s.track.role or '?'}:{s.source_type}" for s in selection.sources
+                ),
+            )
+            produced = await download_selection(
+                selection,
+                core=session.core,
+                target=job.output_file,
+                work_dir=job.state_file.parent / job.id,
+                stop_event=job.stop_event,
+                report=callback,
+                on_muxing=lambda: job.transition(LifecycleState.MUXING),
+            )
+            # `None` means the stop event ended it - the same signal the engine
+            # gives with `False`, and handled by the same code.
+            _handle_download_result(job, produced is not None)
+            if produced is not None:
+                _clear_work_dir(job)
 
     except asyncio.CancelledError:
         logger.info("[JOB %s] CancelledError caught", job.id)

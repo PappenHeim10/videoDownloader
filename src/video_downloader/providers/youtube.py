@@ -45,6 +45,8 @@ from urllib.parse import parse_qs, urlsplit
 from base_api.models import Media, MediaSource, MediaTrackInfo
 from base_api.modules.errors import UnsupportedURLError
 
+from video_downloader.application.track_download import YTDLP_TRANSPORT
+
 logger = logging.getLogger(__name__)
 
 #: Hosts whose watch URLs this adapter claims.
@@ -522,7 +524,10 @@ class YouTubeAdapter:
 
         return MediaSource(
             url=entry["url"],
-            source_type="HTTP",
+            # Fetched by the resolver that produced the URL rather than by the
+            # engine's transport. `source_type` names the transport, which is
+            # exactly the question it has always answered.
+            source_type=YTDLP_TRANSPORT,
             headers=dict(headers) if isinstance(headers, dict) else {},
             expected_size=_stated_int(entry.get("filesize"))
             or _stated_int(entry.get("filesize_approx")),

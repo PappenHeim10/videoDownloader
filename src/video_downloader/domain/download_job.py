@@ -29,6 +29,10 @@ class LifecycleState(StrEnum):
     CONNECTING = "connecting"
     FETCHING_METADATA = "fetching_metadata"
     DOWNLOADING = "downloading"
+    #: Both tracks are on disk and are being combined into one file. Its own
+    #: state because otherwise the progress bar sits at 100% with no file to
+    #: open and nothing to explain the wait.
+    MUXING = "muxing"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     FAILED = "failed"
@@ -51,7 +55,16 @@ class DownloadJob:
     progress_unit: ProgressUnit = ProgressUnit.SEGMENTS
     progress: float = 0.0
     error: str | None = None
+    #: Bytes this job is expected to transfer, once the tracks are known. `None`
+    #: until then, and for a provider that states no size.
+    expected_bytes: int | None = None
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+    #: Asked before a large download starts, with the estimated total in bytes.
+    #: `None` means nobody is there to ask - a CLI or a test - and the download
+    #: proceeds. Returning False cancels it before a byte is transferred.
+    confirm_large_download: Callable[["DownloadJob", int], bool] | None = field(
+        default=None, repr=False
+    )
     asyncio_task: object | None = None
     on_change: Callable[["DownloadJob"], None] | None = field(default=None, repr=False)
 
