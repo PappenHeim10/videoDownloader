@@ -47,6 +47,24 @@ from video_downloader.providers import PeerTubeAdapter, peertube
 XHAMSTER_URL = "https://xhamster.com/videos/example-1"
 PEERTUBE_URL = "https://video.blender.org/w/pVUiwGhkrrwWqW7jyHer4z"
 DIRECT_URL = "https://cdn.example/live/master.m3u8"
+
+#: Every YouTube form the adapter claims, plus the PeerTube near-miss that made
+#: the ambiguity check worth extending: `/w/<21-22 chars>` is claimed on any
+#: host, and a YouTube id is eleven characters, so the two must not collide.
+YOUTUBE_URLS = (
+    "https://www.youtube.com/watch?v=tEwb4cuFjKE",
+    "https://youtube.com/watch?v=tEwb4cuFjKE",
+    "https://m.youtube.com/watch?v=tEwb4cuFjKE",
+    "https://music.youtube.com/watch?v=tEwb4cuFjKE",
+    "https://youtu.be/tEwb4cuFjKE",
+    "https://www.youtube.com/shorts/YX9duUGcDxI",
+    "https://www.youtube.com/embed/tEwb4cuFjKE",
+    "https://www.youtube.com/v/tEwb4cuFjKE",
+    "https://www.youtube.com/live/hESFZeam7Gc",
+    "https://www.youtube-nocookie.com/embed/tEwb4cuFjKE",
+    "https://www.youtube.com/watch?v=tEwb4cuFjKE&list=PLabc&index=2",
+    "https://www.youtube.com/playlist?list=PLabc",
+)
 UNSUPPORTED_URL = "https://example.com/watch?v=abc"
 
 
@@ -188,7 +206,7 @@ async def test_the_production_registry_is_not_ambiguous_about_any_url(monkeypatc
     session = create_provider_session()
     try:
         assert session.registry._providers  # composition actually happened
-        for url in (XHAMSTER_URL, PEERTUBE_URL, DIRECT_URL):
+        for url in (XHAMSTER_URL, PEERTUBE_URL, DIRECT_URL, *YOUTUBE_URLS):
             claiming = [type(p).__name__ for p in session.registry._providers if p.supports(url)]
             assert len(claiming) == 1, f"{url} claimed by {claiming}"
     finally:
@@ -472,6 +490,7 @@ def test_the_production_registry_registers_every_adapter():
         assert registered == {
             "XHamsterAdapter",
             "PeerTubeAdapter",
+            "YouTubeAdapter",
             "DirectMediaAdapter",
         }
     finally:
