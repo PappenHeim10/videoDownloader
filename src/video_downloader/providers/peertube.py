@@ -41,9 +41,10 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any, Optional
+from pathlib import PurePosixPath
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
-from base_api.models import Media, MediaSource
+from base_api.models import Media, MediaSource, MediaTrackInfo
 from base_api.modules.errors import UnsupportedURLError
 from curl_cffi.requests import AsyncSession
 
@@ -436,7 +437,49 @@ class PeerTubeAdapter:
             # Verbatim. The comparison that uses it normalizes case and
             # surrounding whitespace; the stored value stays the instance's own.
             quality_label=quality_label,
+            track=cls._track_info(entry, url),
         )
+
+    @classmethod
+    def _track_info(cls, entry: dict, url: str) -> MediaTrackInfo:
+        """What PeerTube states about the media inside one `files[]` entry.
+
+        Four fields, because four is what the endpoint actually answers. It
+        names no codec, no bitrate, no audio language and no dynamic-range
+        variant, and inventing any of those from the file name would be a guess
+        that reads exactly like a fact once it is in the model. They stay unset,
+        which is the model's way of saying the provider said nothing.
+        """
+        container = cls._container_from(url)
+        has_video = entry.get("hasVideo")
+        has_audio = entry.get("hasAudio")
+        return MediaTrackInfo(
+            # Only what the instance asserted. An older instance states neither
+            # flag, and "a file with both, probably" is a guess - the same file
+            # is downloaded either way, and a caller pairing tracks needs to be
+            # able to tell an assertion from an absence.
+            role="combined" if has_video is True and has_audio is True else None,
+            container=container,
+            fps=cls._stated_int(entry.get("fps")),
+            width=cls._stated_int(entry.get("width")) or None,
+            height=cls._stated_int(entry.get("height")) or None,
+        )
+
+    @staticmethod
+    def _container_from(url: str) -> Optional[str]:
+        """The container from the URL's *path*, never from the whole URL.
+
+        Object storage can presign, and a query string is then part of the URL
+        but not of the file name. Splitting the extension off the raw URL would
+        turn `.../9d3c-720.mp4?X-Amz-Signature=...` into a container named after
+        a signature.
+        """
+        try:
+            path = urlsplit(url).path
+        except ValueError:
+            return None
+        suffix = PurePosixPath(path).suffix.lstrip(".").lower()
+        return suffix or None
 
     @classmethod
     def _progressive_sources(cls, payload: dict, api_url: str) -> list[MediaSource]:
