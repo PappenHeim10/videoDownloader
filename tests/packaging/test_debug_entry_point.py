@@ -137,6 +137,29 @@ def test_the_frozen_debug_artifact_starts_from_an_unrelated_directory():
 
 
 @needs_artifact
+def test_the_frozen_artifact_can_reach_the_youtube_extractor():
+    """Importing yt_dlp is not the same as being able to resolve with it.
+
+    Extractors are looked up by name at run time, so a build that bundles the
+    package and none of them starts cleanly and then calls every YouTube URL
+    unsupported. That failure exists only in the artifact.
+    """
+    from video_downloader.bootstrap import EXTRACTOR_MARKER
+
+    with tempfile.TemporaryDirectory() as foreign_cwd:
+        result = subprocess.run(
+            [str(DEBUG_EXE), "--smoke-test"],
+            cwd=foreign_cwd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert EXTRACTOR_MARKER in result.stdout
+
+
+@needs_artifact
 def test_the_frozen_artifact_does_not_need_the_source_tree():
     # The bundled package must come out of the executable, not out of src/.
     internal = DEBUG_EXE.parent / "_internal"
