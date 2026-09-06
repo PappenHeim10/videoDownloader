@@ -22,6 +22,12 @@ from video_downloader.application.provider_session import (
     ProviderNotConfiguredError,
     ProviderSession,
 )
+# The quality rule lives with the rest of the selection policy. Re-exported here
+# because that is where callers and tests have always imported it from.
+from video_downloader.application.track_selection import (  # noqa: F401
+    QUALITY_PREFERENCES,
+    select_progressive_source,
+)
 from video_downloader.domain.download_job import DownloadJob, LifecycleState, ProgressUnit
 
 logger = logging.getLogger(__name__)
@@ -57,124 +63,6 @@ def _ensure_async_stop_event(job: DownloadJob) -> None:
 #: thing its own player uses, and the playlist is the one with per-segment
 #: retries and byte-range support behind it.
 SUPPORTED_SOURCE_TYPES = ("HLS", "HTTP")
-
-#: The three orderings that name a position in the list rather than a tier.
-QUALITY_PREFERENCES = frozenset({"best", "worst", "half"})
-
-#: "1080", "1080p", "1080P" - a number with an optional trailing p, nothing else.
-_NUMERIC_QUALITY = re.compile(r"\A(\d+)[pP]?\Z")
-
-
-def _numeric_quality(value: str) -> int | None:
-    match = _NUMERIC_QUALITY.match(value.strip())
-    return int(match.group(1)) if match else None
-
-
-def _order_key(source: MediaSource) -> tuple[int, int, int, str]:
-    """Rank one progressive source, worst first.
-
-    The numeric tier is whatever the provider ranks by (`quality_value`), never
-    a dimension re-derived from a label or a URL - a portrait video's label and
-    its tier legitimately disagree, and only the provider knows which is which.
-
-    Sources without a numeric tier sort below every source that has one and are
-    ordered among themselves by size, so "best" cannot pick an entry whose
-    quality nobody stated over a stated 1080p. The remaining two components are
-    tie-breakers that exist purely so the choice is reproducible: the larger
-    file first (same resolution, more bits), then the URL.
-    """
-    numeric = source.quality_value
-    return (
-        0 if numeric is None else 1,
-        numeric or 0,
-        source.expected_size or 0,
-        source.url,
-    )
-
-
-def _select_by_number(ordered: list[MediaSource], target: int) -> MediaSource:
-    """Exact numeric tier, else the next smaller one, else the smallest."""
-    numeric = [source for source in ordered if source.quality_value is not None]
-    if not numeric:
-        return ordered[0]
-
-    exact = [source for source in numeric if source.quality_value == target]
-    if exact:
-        # Already ordered, so the last one is the best-ranked of the ties.
-        return exact[-1]
-
-    smaller = [source for source in numeric if cast(int, source.quality_value) < target]
-    if smaller:
-        # Downwards, never upwards: a user asking for 720 on a connection that
-        # suits 720 should not silently receive 2160.
-        return smaller[-1]
-    return numeric[0]
-
-
-def select_progressive_source(
-    sources: Sequence[MediaSource], quality: str | int
-) -> MediaSource:
-    """Pick one progressive source for `quality`. No requests, no guessing.
-
-    The semantics differ by the *type* of what is asked for, and deliberately
-    so - nothing is coerced from one into the other:
-
-    * `"best"` / `"worst"` / `"half"` (case-insensitive) name a position in the
-      ranked list and use the numeric tier only.
-    * a **string** is first matched against the provider's own quality label,
-      compared exactly apart from case and surrounding whitespace. This is what
-      makes `"1080p"` find a portrait video the provider labels `"1080p"` and
-      ranks as 1920 - the label is the provider's word for it.
-    * an **integer** never matches a label. `1080` is a tier, `"1080p"` is a
-      name, and the two can point at different files on the same video; making
-      the integer fall back to label matching would make that difference depend
-      on how a caller happened to spell its argument.
-
-    Both spellings then fall through to the same numeric rule: exact tier, else
-    the next smaller tier, else the smallest video available. The distinction is
-    about what *matches*, never about what is ultimately returned - with nothing
-    smaller to fall back to, the last rule can hand an integer request the very
-    file its label would have matched. Two spellings agreeing on a result is not
-    evidence that they took the same route to it.
-
-    A string that is neither a preference, nor a label, nor a number cannot be
-    interpreted - the best available source is used rather than failing the
-    download, because "I do not understand this quality" is not a reason to
-    have no video at all.
-    """
-    ordered = sorted(sources, key=_order_key)
-    if not ordered:
-        raise UnsupportedProtocolError("No progressive source to choose from.")
-
-    if isinstance(quality, str):
-        wanted = quality.strip().casefold()
-        if wanted in QUALITY_PREFERENCES:
-            if wanted == "worst":
-                return ordered[0]
-            if wanted == "half":
-                return ordered[len(ordered) // 2]
-            return ordered[-1]
-
-        labelled = [
-            source
-            for source in ordered
-            if source.quality_label is not None
-            and source.quality_label.strip().casefold() == wanted
-        ]
-        if labelled:
-            return labelled[-1]
-
-        target = _numeric_quality(quality)
-        if target is None:
-            logger.warning(
-                "Quality %r matches no label and is not a number; using the best source.",
-                quality,
-            )
-            return ordered[-1]
-        return _select_by_number(ordered, target)
-
-    return _select_by_number(ordered, int(quality))
-
 
 def select_source(media: Media, quality: str | int) -> MediaSource:
     """Pick the source this application can download, for this quality.
