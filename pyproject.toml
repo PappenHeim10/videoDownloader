@@ -13,8 +13,19 @@ dependencies = [
     # Pinned to known-green fork commits. Do not switch these to branch refs:
     # the point of the pin is a reproducible dependency state.
     # [hls] pulls m3u8 + av, which the segment download and the TS->MP4 remux need.
-    "eaf_base_api[hls] @ git+https://github.com/PappenHeim10/eaf_base_api.git@e8c4e08",
+    "eaf_base_api[hls] @ git+https://github.com/PappenHeim10/eaf_base_api.git@1f1cb1e",
     "xhamster_api @ git+https://github.com/PappenHeim10/unofficial-api-for-xhamster.git@a18cd7b",
+    # Resolves YouTube and fetches its tracks. Pinned exactly, like the forks
+    # above and for a stronger reason: YouTube changes the contract underneath
+    # it, so which release we ship is a tested fact rather than a preference.
+    # Every bump re-runs the same gates before it lands - an extraction
+    # comparison against this baseline, a full download of the three reference
+    # videos, a URL and format comparison, the PyInstaller build, the frozen
+    # smoke test, and a check of whether a JavaScript runtime has become
+    # mandatory. Neither Deno nor Node is bundled; if the pinned release ever
+    # requires one for a video, that surfaces as an error telling the user to
+    # update, never as a silently shorter format list.
+    "yt-dlp==2026.8.19",
 ]
 
 [project.optional-dependencies]

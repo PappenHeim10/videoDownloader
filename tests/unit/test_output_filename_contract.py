@@ -118,3 +118,68 @@ async def test_a_title_that_sanitises_to_nothing_never_yields_a_bare_extension(t
     app_path, engine_path, _ = await _run("///", tmp_path)
     assert app_path.name == "untitled.mp4"
     assert engine_path.name == "untitled.mp4"
+
+
+# --- the extension names what is actually in the file ----------------------
+
+
+def test_an_hls_download_is_still_called_mp4():
+    """It is remuxed into MP4 whatever its segments were."""
+    from base_api.models import MediaSource
+
+    from video_downloader.application.download_service import output_extension
+
+    assert output_extension(MediaSource(url="https://c/x.m3u8", source_type="HLS")) == ".mp4"
+
+
+def test_a_progressive_source_is_named_after_its_container():
+    from base_api.models import MediaSource, MediaTrackInfo
+
+    from video_downloader.application.download_service import output_extension
+
+    for container, expected in (("mp4", ".mp4"), ("webm", ".webm"), ("mkv", ".mkv")):
+        source = MediaSource(
+            url=f"https://c/x.{container}",
+            source_type="HTTP",
+            track=MediaTrackInfo(container=container),
+        )
+        assert output_extension(source) == expected
+
+
+def test_a_provider_that_states_no_container_keeps_the_historical_name():
+    from base_api.models import MediaSource
+
+    from video_downloader.application.download_service import output_extension
+
+    assert output_extension(MediaSource(url="https://c/x", source_type="HTTP")) == ".mp4"
+
+
+@pytest.mark.asyncio
+async def test_a_webm_source_lands_under_a_webm_name(tmp_path):
+    """End to end: the recorded path and the engine's path agree, and both say webm."""
+    from base_api.models import MediaSource, MediaTrackInfo
+
+    core = MagicMock(spec=BaseCore)
+    core.download = AsyncMock(return_value=True)
+    core.close = AsyncMock()
+
+    media = Media(provider="test", original_url=PROVIDER_URL, title="A Video")
+    media.sources = [
+        MediaSource(
+            url="https://cdn.example/v.webm",
+            source_type="HTTP",
+            quality_value=1080,
+            track=MediaTrackInfo(role="combined", container="webm"),
+        )
+    ]
+    registry = MagicMock()
+    registry.resolve = AsyncMock(return_value=media)
+    registry.close = AsyncMock()
+    session = ProviderSession(registry=registry, core=core)
+
+    job = DownloadJob(url=PROVIDER_URL, quality="best", output_dir=tmp_path)
+    await run_download_job(job, session_factory=lambda: session)
+
+    assert job.state == LifecycleState.COMPLETED
+    assert job.output_file.suffix == ".webm"
+    assert Path(core.download.await_args.args[0].path) == job.output_file

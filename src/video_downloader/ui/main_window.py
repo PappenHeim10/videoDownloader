@@ -25,6 +25,23 @@ class JobBridge(QObject):
 _BYTES_PER_MIB = 1024 * 1024
 
 
+#: What each lifecycle state is called in the window. Only the states a user
+#: needs a word for are listed; the rest keep the enum's own value, which is
+#: already readable.
+_STATE_WORDING = {
+    LifecycleState.MUXING: "Spuren werden zusammengefuegt",
+}
+
+
+def state_wording(job: DownloadJob) -> str:
+    """The state in the user's words.
+
+    Muxing needs one badly: without it the bar sits full, no file exists yet,
+    and nothing on screen explains the wait.
+    """
+    return _STATE_WORDING.get(job.state, job.state.value)
+
+
 def progress_details(job: DownloadJob) -> str:
     """The counters, in the words of whatever unit the job is counting in.
 
@@ -80,7 +97,7 @@ class DownloadItem(QFrame):
 
     def refresh(self, job: DownloadJob):
         self.title.setText(job.title or job.url or "Vorhandene Datei")
-        self.status.setText(f"{job.state.value} {progress_details(job)}".strip())
+        self.status.setText(f"{state_wording(job)} {progress_details(job)}".strip())
         if job.state == LifecycleState.DOWNLOADING and not job.has_known_total:
             # A server that states no length gives a total of 0 for the whole
             # run. Qt's own indeterminate mode says "running, end unknown"; a
