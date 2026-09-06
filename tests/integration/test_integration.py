@@ -95,7 +95,12 @@ def test_gui_to_manager_wiring(qt_app, tmp_path, monkeypatch):
     # The window now resolves the destination and hands it down explicitly; the
     # manager no longer decides where anything lands.
     manager.add_download.assert_called_once_with(
-        "http://test", "720", output_dir=target.resolve()
+        "http://test",
+        "720",
+        output_dir=target.resolve(),
+        # The window is the only layer that can ask a question, so it is the
+        # only one that can supply the answer to "this is 4 GiB, continue?".
+        confirm_large_download=window.confirm_large_download,
     )
 
 # 6. Async Call Boundaries
