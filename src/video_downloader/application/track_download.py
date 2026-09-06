@@ -5,11 +5,12 @@ to know which website a job came from:
 
 * `HTTP` goes through the engine's progressive transport, which owns resume,
   retries and atomic finalisation.
-* `YTDLP` goes through the resolver that produced the URL. That is not a
-  preference: the C01 gate proved that path end to end for the three videos our
-  own transport could not finish at the time, and until the readability probe
-  planned for the follow-up exists, "the resolver knows how to fetch what it
-  resolved" is the honest default.
+* `YTDLP` goes through the resolver that produced the URL - unless one
+  one-byte request says our own transport can read the whole thing, in which
+  case it does. That probe is the whole reason the choice can be made per track
+  rather than per provider: the failure it guards against is a URL whose bytes
+  stop partway with no warning, and asking for the last byte answers exactly
+  that, for that track, at the cost of one request.
 
 Progress is aggregated across every phase - each track, then the mux - so the
 bar moves once from zero to done rather than restarting per file.
@@ -19,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -130,6 +131,47 @@ def container_for(selection: TrackSelection) -> ContainerChoice:
         codec_family(selection.video.track.video_codec) if selection.video else None,
         codec_family(selection.audio.track.audio_codec) if selection.audio else None,
     )
+
+
+async def can_engine_read_whole(source: MediaSource, timeout: float = 15.0) -> bool:
+    """Whether our own transport can read this source to the last byte.
+
+    One request for one byte, at the far end of the file. It answers the only
+    question that matters here and that nothing else can answer offline: some
+    media URLs serve a fixed prefix and then refuse, which a download discovers
+    as a 403 somewhere in the middle after transferring everything before it.
+    Asking for the last byte finds that out for a fraction of a kilobyte.
+
+    A source whose size nobody stated cannot be probed - there is no last byte
+    to ask for - and any failure at all answers "no". This must never be the
+    reason a job fails: the fallback path is one that already works.
+    """
+    total = source.expected_size
+    if not total or total <= 0:
+        return False
+
+    from curl_cffi.requests import AsyncSession
+
+    headers = dict(source.headers)
+    headers["Accept-Encoding"] = "identity"
+    headers["Range"] = f"bytes={total - 1}-{total - 1}"
+    try:
+        async with AsyncSession() as session:
+            response = await session.get(source.url, headers=headers, timeout=timeout)
+            return int(response.status_code) == 206
+    except Exception as error:  # noqa: BLE001 - a probe may never fail a job
+        logger.debug("Readability probe failed; keeping the resolver path: %s", error)
+        return False
+
+
+def as_engine_source(source: MediaSource) -> MediaSource:
+    """The same track, marked as one the engine's transport fetches.
+
+    A copy rather than a mutation: the selection is shared with the caller and
+    with the job's own record of what it chose, and rewriting a field on it
+    would change what that record says after the fact.
+    """
+    return replace(source, source_type="HTTP")
 
 
 async def _download_via_engine(
@@ -258,14 +300,20 @@ async def download_selection(
         role = source.track.role or f"track{index}"
         extension = (source.track.container or "bin").strip().lower()
         track_path = work_dir / f"{role}.{extension}"
+        fetch_source = source
+        if is_ytdlp(source) and await can_engine_read_whole(source):
+            # Our own transport owns resume, retries and atomic finalisation, so
+            # it is the better place to be whenever it can finish the job.
+            fetch_source = as_engine_source(source)
+            logger.info("Fetching the %s track through the engine transport.", role)
         try:
-            if is_ytdlp(source):
+            if is_ytdlp(fetch_source):
                 await _download_via_resolver(
-                    source, track_path, progress.callback_for(role), stop_event
+                    fetch_source, track_path, progress.callback_for(role), stop_event
                 )
             else:
                 await _download_via_engine(
-                    core, source, track_path, work_dir / f"{role}.state.json",
+                    core, fetch_source, track_path, work_dir / f"{role}.state.json",
                     progress.callback_for(role), stop_event,
                 )
         except asyncio.CancelledError:
