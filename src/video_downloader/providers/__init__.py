@@ -12,6 +12,15 @@ from video_downloader.providers.peertube import (
     PeerTubeError,
     PeerTubeExtractionError,
 )
+from video_downloader.providers.x import (
+    XAdapter,
+    XError,
+    XExtractionError,
+    XLiveNotSupportedError,
+    XNoSupportedSourceError,
+    XUnavailableError,
+    XUnsupportedTargetError,
+)
 from video_downloader.providers.youtube import (
     YouTubeAdapter,
     YouTubeError,
@@ -28,6 +37,13 @@ __all__ = [
     "PeerTubeDownloadDisabledError",
     "PeerTubeError",
     "PeerTubeExtractionError",
+    "XAdapter",
+    "XError",
+    "XExtractionError",
+    "XLiveNotSupportedError",
+    "XNoSupportedSourceError",
+    "XUnavailableError",
+    "XUnsupportedTargetError",
     "YouTubeAdapter",
     "YouTubeError",
     "YouTubeExtractionError",

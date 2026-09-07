@@ -22,9 +22,10 @@ hiddenimports = (
     + _collect_runtime_submodules("video_downloader")
     # yt-dlp loads its extractors by name at run time, so nothing in the import
     # graph points at them and PyInstaller bundles none of them. Without this the
-    # frozen build imports yt_dlp fine and then reports every YouTube URL as
-    # unsupported - a failure that only shows up in the artifact, never in a
-    # source run, which is why the smoke test below imports the extractor itself.
+    # frozen build imports yt_dlp fine and then reports every YouTube and X URL
+    # as unsupported - a failure that only shows up in the artifact, never in a
+    # source run, which is why the smoke test asks yt-dlp's own registry for each
+    # extractor this application resolves through.
     + _collect_runtime_submodules("yt_dlp")
 )
 
