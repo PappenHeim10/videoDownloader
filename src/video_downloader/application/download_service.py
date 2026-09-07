@@ -18,7 +18,10 @@ from base_api.modules.errors import (
 )
 from base_api.modules.static_functions import strip_title
 
-from video_downloader.application.provider_refusal import ProviderRefusal
+from video_downloader.application.provider_refusal import (
+    ProviderLoginRequired,
+    ProviderRefusal,
+)
 from video_downloader.application.provider_session import (
     ProviderNotConfiguredError,
     ProviderSession,
@@ -333,6 +336,39 @@ def _handle_download_result(job: DownloadJob, result: Any) -> None:
         job.state_file.unlink(missing_ok=True)
 
 
+async def _resolve(job: DownloadJob, session: ProviderSession) -> Any:
+    """The job's URL into `Media`, with one more attempt if a login was missing.
+
+    A provider that refuses only for want of a session says so with
+    `ProviderLoginRequired`, which carries the site and its login page and
+    nothing about which provider raised it. If somebody is there to ask, they
+    are asked; if they sign in, the resolution runs once more and the adapter
+    reads the session that now exists.
+
+    Exactly once. The second attempt is not guarded, so a refusal that survives
+    a login reaches the caller as the refusal it is - and an adapter that has a
+    session raises the plain unavailable refusal anyway, because asking a user
+    to sign in again would be asking them to repeat what did not work.
+    """
+    logger.info("[JOB %s] resolve start URL: %s", job.id, job.url)
+    try:
+        return await session.registry.resolve(job.url)
+    except ProviderLoginRequired as refusal:
+        if job.request_login is None:
+            raise
+        logger.info(
+            "[JOB %s] %s refused for want of a login; asking: %s",
+            job.id, getattr(refusal, "site", "?"), refusal,
+        )
+        if not await job.request_login(refusal):
+            # Cancelled, or the window closed without a session. The refusal is
+            # the truth about the URL, so it stands rather than becoming a
+            # different failure.
+            raise
+        logger.info("[JOB %s] signed in; resolving once more", job.id)
+        return await session.registry.resolve(job.url)
+
+
 async def run_download_job(
     job: DownloadJob,
     session_factory: Callable[[], ProviderSession] | None = None,
@@ -360,8 +396,7 @@ async def run_download_job(
         session = session_factory()
 
         job.transition(LifecycleState.FETCHING_METADATA)
-        logger.info("[JOB %s] resolve start URL: %s", job.id, job.url)
-        media = await session.registry.resolve(job.url)
+        media = await _resolve(job, session)
         logger.info("[JOB %s] resolve finished, provider=%s", job.id, getattr(media, "provider", "unknown"))
 
         job.title = getattr(media, "title", None) or job.url

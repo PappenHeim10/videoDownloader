@@ -59,6 +59,7 @@ class DownloadManager:
         remux: bool = True,
         output_dir: str | Path | None = None,
         confirm_large_download: Callable[[DownloadJob, int], bool] | None = None,
+        request_login: Callable[[Exception], object] | None = None,
     ) -> DownloadJob:
         if self._shutdown:
             raise RuntimeError("DownloadManager ist bereits beendet")
@@ -82,6 +83,7 @@ class DownloadManager:
             output_dir=target,
             remux=remux,
             confirm_large_download=confirm_large_download,
+            request_login=request_login,
         )
         self._jobs[job.id] = job
         logger.info("[JOB %s] Download added url=%s quality=%s remux=%s", job.id, job.url, job.quality, job.remux)
