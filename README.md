@@ -1,49 +1,60 @@
 # Video Downloader
 
-A modern, asynchronous desktop application for downloading and processing HTTP Live Streaming (HLS) videos, featuring a responsive UI built with PySide6 and qasync.
+A modern, asynchronous desktop application for downloading video from the sites listed below, featuring a responsive UI built with PySide6 and qasync. It handles segmented HLS streams, single-file progressive downloads, and separate video and audio tracks that have to be combined back into one file.
 
 ---
 
 ## 📥 How the Download Process Works
 
-The download process is heavily optimized for performance, resilience, and UI responsiveness. It follows a structured lifecycle for each video:
+The download process is optimized for performance, resilience, and UI responsiveness. What a job actually does depends on what the provider offers, but every job passes the same five stages:
 
-1. **Metadata Extraction:** 
-   When you input a URL, the app instantiates an isolated `Client`. This client scrapes the target webpage to extract the raw video metadata, including the title and the master playlist URL (an `.m3u8` file).
-   
-2. **HLS Playlist Resolution:** 
-   The master `.m3u8` playlist is fetched and parsed. If you requested a specific quality (e.g., `1080p`), the app finds the corresponding media playlist for that resolution. The media playlist contains hundreds or thousands of tiny video chunks, known as `.ts` (Transport Stream) segments.
+1. **Resolution:**
+   The URL goes to whichever registered adapter claims it. The adapter queries or scrapes the site and returns a provider-neutral `Media` object — the title, the duration, and one `MediaSource` per downloadable variant. Each adapter owns the session it extracts with, so whatever that session picks up along the way — a `Referer`, a cookie the site sets during the page fetch — dies with it and never reaches the download engine.
 
-3. **Concurrent Segment Downloading:**
-   Instead of downloading a single massive file, the underlying `BaseCore` engine utilizes `aiohttp` to download multiple `.ts` segments concurrently. This maximizes your bandwidth utilization.
-   
+2. **Track Selection:**
+   You ask for a position — `best`, `worst`, `half` — or for a concrete tier like `1080p` or `720`, and the sources are ranked by the provider's own quality value. A provider that publishes finished files settles on exactly one source here. A provider that publishes picture and sound separately settles on two, and stage 5 combines them.
+
+3. **Fetching:**
+   Two paths, chosen per track by the source's own type rather than per website. An ordinary HTTP source goes through the engine's progressive transport, which owns resume, retries and atomic finalisation. A source that only a resolver can produce goes through that resolver — unless a single one-byte request, aimed at the last byte of the file, proves our own transport can read the whole thing. That probe guards against URLs that serve a fixed prefix and then refuse, which a download would otherwise discover as a failure in the middle, after transferring everything before it.
+
+   For HLS sources this is where `BaseCore` earns its keep: instead of one massive file it fetches the many small `.ts` segments concurrently with `aiohttp`.
+
 4. **State Tracking (Resume Capability):**
-   During the download, the app writes progress to a temporary `.state.json` file. If the app crashes, your PC reboots, or you pause/cancel the download, you can resume it later without starting from scratch.
+   Each track writes its progress to its own `.state.json` file while it downloads. If the app crashes, your PC reboots, or you pause or cancel, the download resumes later instead of starting from scratch — and a half-finished track is kept, so a cancelled two-track job does not cost twice as much to resume.
 
-5. **Remuxing (Stitching it Together):**
-   Once all the `.ts` segments are fully downloaded, the app performs a "remuxing" operation. It quickly merges and converts the raw stream data into a standard, widely-compatible `.mp4` file, and then cleans up the temporary segments.
+5. **Combining:**
+   HLS segments are remuxed into a standard, widely-compatible `.mp4`, and the temporary segments are cleaned up. A separate video and audio track are muxed into one container losslessly — packet for packet, never re-encoded. A file that already arrived complete needs neither step. The finished file is moved onto its target exactly once, so an existing download is never replaced by a half-written one.
 
 ---
 
 ## 🎬 Supported Video Types
 
-The application is explicitly designed to handle **HLS (HTTP Live Streaming)** feeds. 
+Three shapes of source, all ending in one playable file:
 
-Unlike direct MP4 downloads (where the video is a single static file on a server), HLS delivers video in chunks via playlists. The downloader excels at parsing these `.m3u8` playlists, downloading the fragmented `.ts` transport streams, and compiling them into a final **`.mp4`** video.
+- **HLS (HTTP Live Streaming)** — video delivered in chunks through `.m3u8` playlists. The downloader parses the playlist, fetches the fragmented `.ts` transport streams concurrently, and compiles them into an `.mp4`.
+- **Progressive files** — a single static file on a server, already carrying both picture and sound. Nothing to assemble: it is fetched with resume and retries, and it is done.
+- **Separate video and audio tracks** — picture and sound published as two files, which is all YouTube offers. Both are fetched, then muxed together locally without re-encoding.
 
 ---
 
 ## 🌐 Accepted Sources
 
-The architecture of this application is highly modular. The core downloading logic (handling HLS, concurrency, and remuxing) is separated from the site-specific scraping logic.
+The architecture of this application is highly modular. The core downloading logic — HLS, concurrency, remuxing — is separated from the site-specific extraction logic. `create_provider_session()` in `bootstrap.py` is the single place that knows which sites are supported.
 
 **Currently Supported Sources:**
-- **xHamster:** Fully integrated via the `xhamster_api` package. It accepts standard video URLs from this platform.
-  - **Single Videos & Shorts:** Download any individual video or short.
-  - **Channels / Pornstars / Creators:** You can input a URL for a Channel, Pornstar, or Creator, and the application will orchestrate concurrent downloads for all of their videos and shorts!
+
+- **xHamster** — via the `xhamster_api` package.
+  - **Single Videos & Shorts:** download any individual video or short.
+  - **Channels / Pornstars / Creators:** input a URL for a Channel, Pornstar or Creator, and the application orchestrates concurrent downloads for all of their videos and shorts.
+- **PeerTube** — a watch URL on any instance. One `GET /api/v1/videos/{id}` call resolves it, which is the same request the official web player makes. An instance that has downloading disabled is reported as such rather than failing obscurely.
+- **YouTube** — watch URLs, resolved through `yt-dlp`. YouTube publishes no combined format, so every download fetches a video track and an audio track and muxes them locally.
+- **X (formerly Twitter)** — single posts on `x.com` and `twitter.com`, including the `/i/web/status/…` form and the `/status/…/video/1` link X produces when an attachment is opened directly. X hands out finished progressive MP4s, so there is nothing to assemble. A profile, a feed, or a post that carries no video is refused with a sentence that says which of those it was.
+- **Direct media URLs** — an `.m3u8` or comparable technical media URL pasted straight in, with no site to scrape.
+
+Live broadcasts and Spaces are refused rather than downloaded.
 
 **Future Extensibility:**
-Because the app uses isolated API clients, adding support for new websites (like YouTube, Vimeo, or other streaming platforms) simply requires creating a new client adapter that can extract an `.m3u8` URL from the target site's HTML. The underlying download engine (`BaseCore`) handles the rest automatically.
+Adding a site means writing one adapter that turns a URL into a `Media` with its list of `MediaSource` objects, and registering it in `create_provider_session()`. Selection, fetching, resume and muxing already work against that provider-neutral shape, and an adapter never touches the download engine's session — so a new site changes what can be downloaded without changing how downloading works.
 
 ---
 
