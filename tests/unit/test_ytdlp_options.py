@@ -14,9 +14,68 @@ from __future__ import annotations
 
 import logging
 
-from video_downloader.providers.ytdlp_options import base_options
+from video_downloader.domain.site_session import SessionCookie, SiteSession
+from video_downloader.providers.ytdlp_options import base_options, install_session
 
 LOGGER_NAME = "video_downloader.providers.ytdlp_options"
+
+
+class _Resolver:
+    """Stands in for `YoutubeDL`, which is a cookie jar as far as this matters."""
+
+    def __init__(self) -> None:
+        from http.cookiejar import CookieJar
+
+        self.cookiejar = CookieJar()
+
+
+def test_a_session_reaches_the_requests_the_resolver_will_make():
+    """The point of installing a session: the API call carries it.
+
+    Asserted through the jar's own matching rather than by reading back what
+    was inserted, because the question is not "is the cookie in the jar" but
+    "does it go out with a request to the host that checks it" - X sets the
+    session on `.x.com` and the endpoint that reads it is `api.x.com`.
+    """
+    from urllib.request import Request
+
+    resolver = _Resolver()
+    install_session(resolver, SiteSession.now("x.com", (
+        SessionCookie("auth_token", "token-value", ".x.com"),
+        SessionCookie("ct0", "csrf-value", ".x.com"),
+    )))
+
+    request = Request("https://api.x.com/1.1/guest/activate.json")
+    resolver.cookiejar.add_cookie_header(request)
+
+    sent = request.get_header("Cookie") or ""
+    assert "auth_token=token-value" in sent
+    assert "ct0=csrf-value" in sent
+
+
+def test_a_session_is_not_sent_to_a_site_it_does_not_belong_to():
+    from urllib.request import Request
+
+    resolver = _Resolver()
+    install_session(resolver, SiteSession.now("x.com", (
+        SessionCookie("auth_token", "token-value", ".x.com"),
+    )))
+
+    elsewhere = Request("https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/x.mp4")
+    resolver.cookiejar.add_cookie_header(elsewhere)
+
+    assert elsewhere.get_header("Cookie") is None
+
+
+def test_installing_a_session_logs_names_and_never_values(caplog):
+    resolver = _Resolver()
+    with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
+        install_session(resolver, SiteSession.now("x.com", (
+            SessionCookie("auth_token", "a-token-nobody-may-log", ".x.com"),
+        )))
+
+    assert "auth_token" in caplog.text
+    assert "a-token-nobody-may-log" not in caplog.text
 
 
 def test_the_resolver_is_never_asked_to_be_verbose_or_to_read_cookies():

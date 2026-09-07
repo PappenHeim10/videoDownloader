@@ -13,7 +13,12 @@ from PySide6.QtWidgets import (
 
 from video_downloader.domain.download_job import DownloadJob, LifecycleState, ProgressUnit
 from video_downloader.application.download_manager import DownloadManager
+from video_downloader.infrastructure.session_store import SessionStore
 from video_downloader.infrastructure.settings import AppSettings
+# The one site with a login, named here only for the menu entry that offers it
+# ahead of time. The automatic path never names a provider: it is driven by the
+# refusal, which carries its own site, login page and cookie names.
+from video_downloader.providers.x import XLoginRequiredError
 
 
 class JobBridge(QObject):
@@ -110,16 +115,35 @@ class DownloadItem(QFrame):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, manager: DownloadManager, settings: AppSettings | None = None):
+    def __init__(
+        self,
+        manager: DownloadManager,
+        settings: AppSettings | None = None,
+        sessions: SessionStore | None = None,
+    ):
         super().__init__()
         self.manager = manager
         self.settings = settings or AppSettings()
+        # The same store the job registries read from, handed in by the
+        # composition root. `None` means no login is on offer - a test, or a
+        # window built without one - and the actions below say so rather than
+        # pretending.
+        self.sessions = sessions
         self._closing = False
         self._shutdown_done = False
         self.setWindowTitle("Video Downloader")
 
         folder_menu = self.menuBar().addMenu("&Einstellungen")
         folder_menu.addAction("Download-Ordner ändern…", self.change_download_directory)
+        folder_menu.addSeparator()
+        folder_menu.addAction(
+            f"Bei {XLoginRequiredError.site} anmelden…",
+            lambda: self._run(self.sign_in_to_site(XLoginRequiredError)),
+        )
+        folder_menu.addAction(
+            f"Von {XLoginRequiredError.site} abmelden",
+            lambda: self.sign_out_of_site(XLoginRequiredError.site),
+        )
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -170,6 +194,66 @@ class MainWindow(QMainWindow):
         # were created with, so nothing moves under the user's feet.
         return self.settings.set_download_directory(chosen)
 
+    def _run(self, coroutine) -> None:
+        """Start a coroutine a menu entry asked for.
+
+        A menu action is a plain callable and cannot await, so the work goes to
+        the loop the window already runs on. Nothing waits for the result: the
+        window reports what happened itself.
+        """
+        asyncio.ensure_future(coroutine)
+
+    async def sign_in_to_site(self, refusal) -> bool:
+        """Show a site's own login page and keep the session it produces.
+
+        Takes the refusal - or the refusal *class*, which is what the menu entry
+        has - because both carry the same three facts: the site, its login page,
+        and the cookies that mean the login worked. Nothing here knows which
+        provider raised it.
+        """
+        if self.sessions is None:
+            self.statusBar().showMessage(
+                "Anmeldung ist in diesem Fenster nicht verfuegbar.", 5000
+            )
+            return False
+
+        # Imported here and nowhere else: this is what pulls in Qt WebEngine,
+        # and a session that never signs in never pays for it.
+        from video_downloader.ui.login_window import sign_in
+
+        session = await sign_in(
+            site=refusal.site,
+            login_url=refusal.login_url,
+            required_cookies=refusal.required_cookies,
+            parent=self,
+        )
+        if session is None:
+            self.statusBar().showMessage(
+                f"Anmeldung bei {refusal.site} abgebrochen.", 5000
+            )
+            return False
+
+        kept = self.sessions.save(session)
+        self.statusBar().showMessage(
+            f"Bei {session.site} angemeldet."
+            if kept
+            else f"Bei {session.site} angemeldet - gilt nur fuer diese Sitzung.",
+            5000,
+        )
+        return True
+
+    def sign_out_of_site(self, site: str) -> None:
+        """Forget a site's session, here and on disk."""
+        if self.sessions is None:
+            return
+        removed = self.sessions.clear(site)
+        self.statusBar().showMessage(
+            f"Von {site} abgemeldet."
+            if removed
+            else f"Es war keine Anmeldung fuer {site} gespeichert.",
+            5000,
+        )
+
     def add_download(self):
         url = self.url.text().strip()
         if not url:
@@ -187,6 +271,7 @@ class MainWindow(QMainWindow):
             self.quality.text().strip() or "best",
             output_dir=directory,
             confirm_large_download=self.confirm_large_download,
+            request_login=self.sign_in_to_site,
         )
         self.add_item(job)
         self.url.clear()

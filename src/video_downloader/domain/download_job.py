@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 
 class ProgressUnit(StrEnum):
@@ -63,6 +63,18 @@ class DownloadJob:
     #: `None` means nobody is there to ask - a CLI or a test - and the download
     #: proceeds. Returning False cancels it before a byte is transferred.
     confirm_large_download: Callable[["DownloadJob", int], bool] | None = field(
+        default=None, repr=False
+    )
+    #: Asked when a provider refuses the URL only because nobody is signed in to
+    #: that site. Awaited rather than called: the login happens on the site's own
+    #: page in a window, and the loop has to keep running - other downloads keep
+    #: going while it is open. The argument is the refusal itself, which carries
+    #: the site, its login page and the cookies that mean it worked.
+    #:
+    #: `None` means nobody is there to ask - a CLI, a test - and the refusal
+    #: stands. Returning True means a session now exists and the resolution is
+    #: worth exactly one more attempt.
+    request_login: Callable[[Exception], Awaitable[bool]] | None = field(
         default=None, repr=False
     )
     asyncio_task: object | None = None

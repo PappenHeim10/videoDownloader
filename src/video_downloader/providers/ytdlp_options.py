@@ -55,6 +55,49 @@ class _RedactingLogger:
         logger.error("yt-dlp: %s", self._redact(message))
 
 
+def install_session(resolver: Any, session: Any) -> None:
+    """Put a site session into a resolver's cookie jar, in memory only.
+
+    yt-dlp reads cookies from the jar it builds at construction, so a session
+    can be installed after the fact and never has to become a file. Measured on
+    2026-09-07 with a jar entry alone: `TwitterBaseIE.is_logged_in` - which is
+    just `bool(cookies['auth_token'])` - answered True, and the extractor sent
+    the `x-csrf-token` it derives from `ct0`. A cookie file would have been a
+    plaintext account token on disk for the length of a resolution.
+
+    Domain and path come from the site, not from here: what a cookie is valid
+    for is the site's statement, and the jar matches `api.x.com` against a
+    `.x.com` cookie by that rule alone. `secure` is set because these are
+    session credentials and there is no https-less X to send them to.
+
+    Only the names are logged. A value here is an account.
+    """
+    from http.cookiejar import Cookie
+
+    for cookie in session.cookies:
+        resolver.cookiejar.set_cookie(Cookie(
+            version=0,
+            name=cookie.name,
+            value=cookie.value,
+            port=None,
+            port_specified=False,
+            domain=cookie.domain,
+            domain_specified=cookie.domain.startswith("."),
+            domain_initial_dot=cookie.domain.startswith("."),
+            path="/",
+            path_specified=True,
+            secure=True,
+            expires=None,
+            discard=True,
+            comment=None,
+            comment_url=None,
+            rest={},
+        ))
+    logger.debug(
+        "Session fuer %s installiert: %s", session.site, ", ".join(session.names())
+    )
+
+
 def base_options(**overrides: Any) -> dict[str, Any]:
     """The yt-dlp options every call in this application starts from.
 
@@ -63,7 +106,10 @@ def base_options(**overrides: Any) -> dict[str, Any]:
 
     * `verbose=False` - non-negotiable, including in the debug build.
     * `cookiefile=None` and no cookie extraction - this application never reads
-      a browser profile and never sends a credential.
+      a browser profile, and no session ever reaches the disk for yt-dlp to
+      read. A site session established by the user in this application's own
+      login window is installed straight into the resolver's cookie jar by
+      `install_session`, so it exists in this process and nowhere else.
     * `cachedir=False` - nothing about a resolution is worth keeping on disk.
     * `postprocessors=[]` and `writeinfojson=False` - no ffmpeg step, no
       metadata sidecar next to the user's video.

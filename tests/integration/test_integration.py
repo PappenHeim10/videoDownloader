@@ -99,8 +99,11 @@ def test_gui_to_manager_wiring(qt_app, tmp_path, monkeypatch):
         "720",
         output_dir=target.resolve(),
         # The window is the only layer that can ask a question, so it is the
-        # only one that can supply the answer to "this is 4 GiB, continue?".
+        # only one that can supply the answer to "this is 4 GiB, continue?" -
+        # and, for the same reason, the only one that can show a login page when
+        # a site refuses a URL to anyone who is not signed in.
         confirm_large_download=window.confirm_large_download,
+        request_login=window.sign_in_to_site,
     )
 
 # 6. Async Call Boundaries
