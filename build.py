@@ -60,11 +60,42 @@ def run_pyinstaller(spec_file: str, distpath: str, clean: bool):
 
 SMOKE_MARKER = "VideoDownloader smoke OK"
 
+#: mode -> the name its spec builds under. One place, because both the artifact
+#: path and the previous artifact to remove are derived from it, and a name that
+#: drifts between those two is how a build starts reporting success over a
+#: stale executable.
+ARTIFACT_NAMES = {"dev": "VideoDownloader.Debug", "release": "VideoDownloader"}
+
+#: mode -> path of the executable this mode's spec actually produces. Both specs
+#: are onedir, so it is always <dist>/<mode>/<name>/<name>.exe.
 ARTIFACTS = {
-    # mode -> path of the executable this mode's spec actually produces
-    "dev": Path("dist") / "dev" / "VideoDownloader.Debug" / "VideoDownloader.Debug.exe",
-    "release": Path("dist") / "release" / "VideoDownloader" / "VideoDownloader.exe",
+    mode: Path("dist") / mode / name / f"{name}.exe"
+    for mode, name in ARTIFACT_NAMES.items()
 }
+
+
+def remove_previous_artifact(distpath: str, mode: str) -> None:
+    """Delete the artifact of an earlier build of this mode, and only that.
+
+    Not the whole dist directory. It also holds `runtime/`, where an executable
+    started from there wrote its own downloads and logs, and a build is not
+    entitled to a user's files.
+
+    What is removed is exactly what this mode's spec produces, in both layouts:
+    the directory it writes today, and the single file the release build was
+    until the payload grew past half a gigabyte. PyInstaller does not remove the
+    other one - measured, an 89 MB onefile executable from the previous layout
+    sat next to the new directory afterwards, older than it and looking exactly
+    like the thing to ship.
+    """
+    name = ARTIFACT_NAMES[mode]
+    for previous in (Path(distpath) / name, Path(distpath) / f"{name}.exe"):
+        if previous.is_dir():
+            print(f"Removing {previous}\\")
+            shutil.rmtree(previous, ignore_errors=True)
+        elif previous.is_file():
+            print(f"Removing {previous}")
+            previous.unlink()
 
 
 def smoke_test_artifact(mode: str) -> bool:
@@ -145,6 +176,7 @@ def main():
     
     if is_clean:
         clean_build()
+        remove_previous_artifact(distpath, args.mode)
         
     build_success = run_pyinstaller(spec_file, distpath, clean=is_clean)
     if not build_success:
