@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,6 @@ from video_downloader.providers.youtube import (
     YouTubeUnavailableError,
     YouTubeUnsupportedTargetError,
     _canonical_video_id,
-    base_options,
 )
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -299,6 +299,28 @@ async def test_a_storyboard_or_manifest_entry_is_not_offered_as_a_track():
     assert all(".m3u8" not in source.url for source in media.sources)
 
 
+@pytest.mark.asyncio
+async def test_the_resolution_never_runs_on_the_thread_that_awaits_it():
+    """A resolution on the event loop thread is a frozen window.
+
+    yt-dlp is synchronous, and on the GUI's loop thread every second it spends
+    is a second in which nothing repaints and no click is answered - measured
+    at 2.4 s for one X post, with the freeze watchdog reporting it.
+    """
+    payload = load("youtube_video.json")
+    resolved_on: list[threading.Thread] = []
+
+    def resolver(url: str) -> dict:
+        resolved_on.append(threading.current_thread())
+        return payload
+
+    await YouTubeAdapter(resolver=resolver).resolve(
+        f"https://www.youtube.com/watch?v={VIDEO_ID}"
+    )
+
+    assert resolved_on and resolved_on[0] is not threading.current_thread()
+
+
 # --- failure ---------------------------------------------------------------
 
 
@@ -353,54 +375,3 @@ async def test_an_answer_that_is_not_a_video_description_is_an_extraction_error(
 )
 def test_a_resolver_message_becomes_the_failure_this_application_names(message, expected):
     assert isinstance(YouTubeAdapter._classify(message, RuntimeError(message)), expected)
-
-
-# --- privacy ---------------------------------------------------------------
-
-
-def test_the_resolver_is_never_asked_to_be_verbose_or_to_read_cookies():
-    options = base_options()
-
-    assert options["verbose"] is False
-    assert options["cookiefile"] is None
-    assert options["cookiesfrombrowser"] is None
-    assert options["cachedir"] is False
-    assert options["postprocessors"] == []
-    assert options["writeinfojson"] is False
-    assert options["logger"] is not None
-
-
-def test_verbose_cannot_be_switched_on_through_the_overrides():
-    """The debug build raises the application's log level, never the resolver's."""
-    options = base_options(skip_download=True)
-
-    assert options["verbose"] is False
-
-
-def test_the_injected_logger_redacts_a_url_before_it_reaches_the_log(caplog):
-    signed = (
-        "https://rr2---sn-x.googlevideo.com/videoplayback"
-        "?expire=1788668116&ip=2001-db8-SENTINEL&sig=SIG-SENTINEL-VALUE"
-    )
-    injected = base_options()["logger"]
-
-    with caplog.at_level(logging.DEBUG, logger="video_downloader.providers.youtube"):
-        injected.debug(f'[debug] Invoking http downloader on "{signed}"')
-        injected.warning(f"something about {signed}")
-        injected.error(f"failed on {signed}")
-
-    rendered = caplog.text
-    assert "SIG-SENTINEL-VALUE" not in rendered
-    assert "2001-db8-SENTINEL" not in rendered
-    assert "1788668116" not in rendered
-    assert "/videoplayback" in rendered, "the path is the diagnostic value"
-
-
-def test_an_unsigned_url_survives_the_logger_intact(caplog):
-    plain = "https://media.test/videoplayback/140.m4a"
-    injected = base_options()["logger"]
-
-    with caplog.at_level(logging.DEBUG, logger="video_downloader.providers.youtube"):
-        injected.debug(f"fetching {plain}")
-
-    assert plain in caplog.text

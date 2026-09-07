@@ -37,6 +37,7 @@ Two things this file must never do, both learned from measurement:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Optional
@@ -45,7 +46,14 @@ from urllib.parse import parse_qs, urlsplit
 from base_api.models import Media, MediaSource, MediaTrackInfo
 from base_api.modules.errors import UnsupportedURLError
 
+from video_downloader.application.provider_refusal import ProviderRefusal
 from video_downloader.application.track_download import YTDLP_TRANSPORT
+# Shared with the X adapter and with the download layer, which reaches yt-dlp on
+# the same terms. Re-exported so callers keep importing it from here.
+from video_downloader.providers.ytdlp_options import (  # noqa: F401
+    _RedactingLogger,
+    base_options,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +93,7 @@ class YouTubeError(Exception):
     """Base class for the adapter's own failures."""
 
 
-class YouTubeUnsupportedTargetError(YouTubeError):
+class YouTubeUnsupportedTargetError(YouTubeError, ProviderRefusal):
     """A YouTube URL that names something other than one video.
 
     Its own type because "playlists are not supported" and "this link is not
@@ -102,7 +110,7 @@ class YouTubeExtractionError(YouTubeError):
     """
 
 
-class YouTubeUnavailableError(YouTubeError):
+class YouTubeUnavailableError(YouTubeError, ProviderRefusal):
     """YouTube states this video may not be played without more than we have.
 
     Private, members-only, age-restricted, region-blocked, or behind a bot
@@ -112,11 +120,11 @@ class YouTubeUnavailableError(YouTubeError):
     """
 
 
-class YouTubeLiveNotSupportedError(YouTubeError):
+class YouTubeLiveNotSupportedError(YouTubeError, ProviderRefusal):
     """A livestream or a premiere, which this application does not download."""
 
 
-class YouTubeNoSupportedSourceError(YouTubeExtractionError):
+class YouTubeNoSupportedSourceError(YouTubeExtractionError, ProviderRefusal):
     """The answer was readable, but nothing in it can be fetched."""
 
 
@@ -175,73 +183,6 @@ def _canonical_video_id(url: str) -> Optional[str]:
         return segments[1] if _VIDEO_ID.match(segments[1]) else None
 
     return None
-
-
-class _RedactingLogger:
-    """The logger handed to yt-dlp, because its own output is not safe to keep.
-
-    Measured: with `verbose` on, yt-dlp emits the complete signed media URL -
-    expiry, viewer IP, session id and signature. `verbose` is never passed, but
-    a warning or an error can carry a URL too, and the debug channel is where a
-    future release may put one. Every line is rewritten before it reaches the
-    application log.
-    """
-
-    _URLISH = re.compile(r"https?://\S+")
-
-    def _redact(self, message: object) -> str:
-        def shorten(match: re.Match[str]) -> str:
-            parts = urlsplit(match.group(0).rstrip('"\'.,;'))
-            if not parts.query:
-                return match.group(0)
-            return f"{parts.scheme}://{parts.hostname}{parts.path}?<redacted>"
-
-        return self._URLISH.sub(shorten, str(message))
-
-    def debug(self, message: object) -> None:
-        # yt-dlp routes its ordinary progress lines through debug as well.
-        logger.debug("yt-dlp: %s", self._redact(message))
-
-    def info(self, message: object) -> None:
-        logger.debug("yt-dlp: %s", self._redact(message))
-
-    def warning(self, message: object) -> None:
-        logger.warning("yt-dlp: %s", self._redact(message))
-
-    def error(self, message: object) -> None:
-        logger.error("yt-dlp: %s", self._redact(message))
-
-
-def base_options(**overrides: Any) -> dict[str, Any]:
-    """The yt-dlp options every call in this application starts from.
-
-    Written once, here, because each of these is a decision rather than a
-    default and several of them are load-bearing for privacy:
-
-    * `verbose=False` - non-negotiable, including in the debug build.
-    * `cookiefile=None` and no cookie extraction - this application never reads
-      a browser profile and never sends a credential.
-    * `cachedir=False` - nothing about a resolution is worth keeping on disk.
-    * `postprocessors=[]` and `writeinfojson=False` - no ffmpeg step, no
-      metadata sidecar next to the user's video.
-    * an injected logger, so nothing yt-dlp says reaches a log unredacted.
-    """
-    options: dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": False,
-        "noprogress": True,
-        "verbose": False,
-        "cachedir": False,
-        "cookiefile": None,
-        "cookiesfrombrowser": None,
-        "postprocessors": [],
-        "writeinfojson": False,
-        "writethumbnail": False,
-        "writesubtitles": False,
-        "logger": _RedactingLogger(),
-    }
-    options.update(overrides)
-    return options
 
 
 def _stated_int(value: Any) -> Optional[int]:
@@ -370,7 +311,11 @@ class YouTubeAdapter:
         if video_id is None:
             raise UnsupportedURLError(f"Not a supported YouTube video URL: {url}")
 
-        info = self._extract(url)
+        # In a worker thread for the reason the X adapter measured on
+        # 2026-09-07: yt-dlp is synchronous, `resolve` is awaited on the thread
+        # that draws the window, and a resolution there froze the UI for as
+        # long as it took. The fetch has always run off the loop; so does this.
+        info = await asyncio.to_thread(self._extract, url)
         if not isinstance(info, dict):
             # Checked here rather than in `_extract`, so it holds for an
             # injected resolver too: nothing below may assume a shape.

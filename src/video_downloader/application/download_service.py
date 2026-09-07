@@ -18,6 +18,7 @@ from base_api.modules.errors import (
 )
 from base_api.modules.static_functions import strip_title
 
+from video_downloader.application.provider_refusal import ProviderRefusal
 from video_downloader.application.provider_session import (
     ProviderNotConfiguredError,
     ProviderSession,
@@ -74,6 +75,19 @@ def _ensure_async_stop_event(job: DownloadJob) -> None:
 #: retries and byte-range support behind it.
 SUPPORTED_SOURCE_TYPES = ("HLS", "HTTP", YTDLP_TRANSPORT)
 
+#: The subset `BaseCore.download()` has a transport for, and therefore the only
+#: sources it can be handed directly. Everything else is fetched by the layer
+#: that knows how - which is a different question from whether this application
+#: supports it, hence a second name rather than a filter on the one above.
+ENGINE_SOURCE_TYPES = ("HLS", "HTTP")
+
+#: The rest of the supported set: transports this application fetches itself,
+#: because the engine has none for them. A source type in neither tuple is one
+#: nothing here can download, and stays an `UnsupportedProtocolError` - which is
+#: why this is a listed complement rather than "everything that is not an
+#: engine transport".
+RESOLVER_SOURCE_TYPES = (YTDLP_TRANSPORT,)
+
 
 def output_extension(source: MediaSource) -> str:
     """The extension that names what will actually be on disk.
@@ -128,14 +142,33 @@ def select_for_job(media: Media, quality: str | int) -> TrackSelection:
     """What this job downloads: one finished file, or two tracks to combine.
 
     A thin layer over `select_source` and `select_tracks`, and thin on purpose.
-    Every provider that offered one finished file still goes through
-    `select_source` and reaches exactly the path it always did; only a provider
-    that publishes separate tracks reaches the pairing.
+    Every provider that offered one finished file the engine can fetch still
+    goes through `select_source` and reaches exactly the path it always did.
+
+    Two kinds of media go to the pairing layer instead, and the second is not
+    about pairing at all: a provider that publishes separate tracks, and a
+    provider whose files this application fetches itself. `select_source`
+    answers "which of these does the *engine* download", and for a resolver
+    transport the honest answer is none of them - which would fail a job that is
+    perfectly downloadable by another path. `select_tracks` ranks on what the
+    tracks say rather than on how their bytes arrive, so it answers for both.
+
+    A source type in neither tuple still reaches `select_source` and still fails
+    there, because "this application has no way to fetch this" is exactly what
+    it has always reported and remains true.
     """
     sources = list(getattr(media, "sources", ()) or ())
-    if any(source.track.role in ("video", "audio") for source in sources):
+    if any(source.track.role in ("video", "audio") for source in sources) or any(
+        source.source_type in RESOLVER_SOURCE_TYPES for source in sources
+    ):
         return select_tracks(
-            [source for source in sources if source.source_type != "HLS"], quality
+            [
+                source
+                for source in sources
+                if source.source_type in SUPPORTED_SOURCE_TYPES
+                and source.source_type != "HLS"
+            ],
+            quality,
         )
     return TrackSelection(combined=select_source(media, quality))
 
@@ -150,7 +183,7 @@ def takes_single_source_path(selection: TrackSelection) -> bool:
     """
     return (
         selection.combined is not None
-        and selection.combined.source_type in ("HLS", "HTTP")
+        and selection.combined.source_type in ENGINE_SOURCE_TYPES
     )
 
 
@@ -390,6 +423,7 @@ async def run_download_job(
                 core=session.core,
                 target=job.output_file,
                 work_dir=job.state_file.parent / job.id,
+                page_url=getattr(media, "original_url", None) or job.url,
                 stop_event=job.stop_event,
                 report=callback,
                 on_muxing=lambda: job.transition(LifecycleState.MUXING),
@@ -412,6 +446,19 @@ async def run_download_job(
         job.error = f"{type(error).__name__}: {error}"
         job.transition(LifecycleState.FAILED)
         logger.warning("[JOB %s] Provider selection failed for %s: %s", job.id, job.url, error)
+    except ProviderRefusal as error:
+        # A provider answered, and the answer was no - already classified by the
+        # adapter, already carrying the sentence the user reads. Nothing failed,
+        # so nothing is logged as though something had: the measured cost of the
+        # branch below was three chained exceptions over fourteen frames for a
+        # post that simply carried no video. The job still fails; a refusal is
+        # not a download.
+        job.error = f"{type(error).__name__}: {error}"
+        job.transition(LifecycleState.FAILED)
+        logger.warning(
+            "[JOB %s] The provider refused %s: %s (%s)",
+            job.id, job.url, error, type(error).__name__,
+        )
     except Exception as error:
         job.error = f"{type(error).__name__}: {error}"
         job.transition(LifecycleState.FAILED)
