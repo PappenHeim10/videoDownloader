@@ -18,6 +18,7 @@ from base_api.modules.errors import (
 )
 from base_api.modules.static_functions import strip_title
 
+from video_downloader.application.provider_refusal import ProviderRefusal
 from video_downloader.application.provider_session import (
     ProviderNotConfiguredError,
     ProviderSession,
@@ -445,6 +446,19 @@ async def run_download_job(
         job.error = f"{type(error).__name__}: {error}"
         job.transition(LifecycleState.FAILED)
         logger.warning("[JOB %s] Provider selection failed for %s: %s", job.id, job.url, error)
+    except ProviderRefusal as error:
+        # A provider answered, and the answer was no - already classified by the
+        # adapter, already carrying the sentence the user reads. Nothing failed,
+        # so nothing is logged as though something had: the measured cost of the
+        # branch below was three chained exceptions over fourteen frames for a
+        # post that simply carried no video. The job still fails; a refusal is
+        # not a download.
+        job.error = f"{type(error).__name__}: {error}"
+        job.transition(LifecycleState.FAILED)
+        logger.warning(
+            "[JOB %s] The provider refused %s: %s (%s)",
+            job.id, job.url, error, type(error).__name__,
+        )
     except Exception as error:
         job.error = f"{type(error).__name__}: {error}"
         job.transition(LifecycleState.FAILED)

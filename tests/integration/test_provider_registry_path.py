@@ -21,6 +21,7 @@ the one method that would fetch is stubbed.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,12 @@ from video_downloader.application.provider_session import (
 from video_downloader.bootstrap import create_job_runner, create_provider_session
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
 from video_downloader.infrastructure.event_loop import new_event_loop
-from video_downloader.providers import PeerTubeAdapter, peertube
+from video_downloader.providers import (
+    PeerTubeAdapter,
+    XExtractionError,
+    XNoSupportedSourceError,
+    peertube,
+)
 
 XHAMSTER_URL = "https://xhamster.com/videos/example-1"
 PEERTUBE_URL = "https://video.blender.org/w/pVUiwGhkrrwWqW7jyHer4z"
@@ -378,6 +384,46 @@ async def test_provider_selection_failures_stay_distinguishable_from_other_failu
         await run_download_job(job, session_factory=factory)
         assert job.state == LifecycleState.FAILED
         assert job.error.startswith(f"{expected}:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "level", "traceback_expected"),
+    [
+        (XNoSupportedSourceError("Dieser Beitrag enthaelt kein Video."),
+         logging.WARNING, False),
+        (XExtractionError("Request to X failed: connection reset"),
+         logging.ERROR, True),
+    ],
+    ids=["refusal", "failure"],
+)
+async def test_a_refusal_is_logged_as_its_sentence_and_a_failure_as_a_traceback(
+    tmp_path, caplog, error, level, traceback_expected
+):
+    """A provider's "no" is an outcome; a broken request is a defect.
+
+    Measured before the two were split: a post that simply carried no video was
+    logged as three chained exceptions over fourteen frames, ending in the
+    sentence that was meant for the user. A real extraction failure still gets
+    the whole stack, because for that one the stack is the point.
+
+    Both fail the job either way - a refusal is not a download.
+    """
+    factory, created = session_factory(resolve_error=error)
+    job = job_in(tmp_path)
+
+    with caplog.at_level(logging.DEBUG, logger="video_downloader.application.download_service"):
+        await run_download_job(job, session_factory=factory)
+
+    assert job.state == LifecycleState.FAILED
+    assert job.error.startswith(f"{type(error).__name__}:")
+    assert created[0].core.configurations == []
+
+    reported = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert [record.levelno for record in reported] == [level]
+    assert (reported[0].exc_info is not None) is traceback_expected
+    if not traceback_expected:
+        assert str(error) in reported[0].getMessage()
 
 
 @pytest.mark.asyncio

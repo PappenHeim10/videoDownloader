@@ -52,6 +52,7 @@ from urllib.parse import urlsplit
 from base_api.models import Media, MediaSource, MediaTrackInfo
 from base_api.modules.errors import UnsupportedURLError
 
+from video_downloader.application.provider_refusal import ProviderRefusal
 from video_downloader.application.track_download import YTDLP_TRANSPORT
 from video_downloader.providers.ytdlp_options import base_options
 
@@ -127,10 +128,16 @@ _DESCRIBED_FIELDS = (
 
 
 class XError(Exception):
-    """Base class for the adapter's own failures."""
+    """Base class for the adapter's own failures.
+
+    The ones that are a refusal rather than a failure - X answered, and the
+    answer was no - additionally carry `ProviderRefusal`, which is what lets the
+    download service report them as the sentence they are instead of as a
+    traceback.
+    """
 
 
-class XUnsupportedTargetError(XError):
+class XUnsupportedTargetError(XError, ProviderRefusal):
     """An X URL that names something other than one post.
 
     Its own type because "profiles are not supported" and "this link is not
@@ -147,7 +154,7 @@ class XExtractionError(XError):
     """
 
 
-class XUnavailableError(XError):
+class XUnavailableError(XError, ProviderRefusal):
     """X states this post may not be read without more than we have.
 
     A protected account, an age-restricted post, a suspended account, or a rate
@@ -157,11 +164,11 @@ class XUnavailableError(XError):
     """
 
 
-class XLiveNotSupportedError(XError):
+class XLiveNotSupportedError(XError, ProviderRefusal):
     """A live broadcast or a Space, which this application does not download."""
 
 
-class XNoSupportedSourceError(XExtractionError):
+class XNoSupportedSourceError(XExtractionError, ProviderRefusal):
     """The post was read, and carries no video.
 
     The ordinary case by far - a post with only text, a photo or a link

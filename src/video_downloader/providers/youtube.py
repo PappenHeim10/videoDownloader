@@ -46,6 +46,7 @@ from urllib.parse import parse_qs, urlsplit
 from base_api.models import Media, MediaSource, MediaTrackInfo
 from base_api.modules.errors import UnsupportedURLError
 
+from video_downloader.application.provider_refusal import ProviderRefusal
 from video_downloader.application.track_download import YTDLP_TRANSPORT
 # Shared with the X adapter and with the download layer, which reaches yt-dlp on
 # the same terms. Re-exported so callers keep importing it from here.
@@ -92,7 +93,7 @@ class YouTubeError(Exception):
     """Base class for the adapter's own failures."""
 
 
-class YouTubeUnsupportedTargetError(YouTubeError):
+class YouTubeUnsupportedTargetError(YouTubeError, ProviderRefusal):
     """A YouTube URL that names something other than one video.
 
     Its own type because "playlists are not supported" and "this link is not
@@ -109,7 +110,7 @@ class YouTubeExtractionError(YouTubeError):
     """
 
 
-class YouTubeUnavailableError(YouTubeError):
+class YouTubeUnavailableError(YouTubeError, ProviderRefusal):
     """YouTube states this video may not be played without more than we have.
 
     Private, members-only, age-restricted, region-blocked, or behind a bot
@@ -119,11 +120,11 @@ class YouTubeUnavailableError(YouTubeError):
     """
 
 
-class YouTubeLiveNotSupportedError(YouTubeError):
+class YouTubeLiveNotSupportedError(YouTubeError, ProviderRefusal):
     """A livestream or a premiere, which this application does not download."""
 
 
-class YouTubeNoSupportedSourceError(YouTubeExtractionError):
+class YouTubeNoSupportedSourceError(YouTubeExtractionError, ProviderRefusal):
     """The answer was readable, but nothing in it can be fetched."""
 
 

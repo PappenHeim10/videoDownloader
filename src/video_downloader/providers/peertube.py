@@ -48,6 +48,8 @@ from base_api.models import Media, MediaSource, MediaTrackInfo
 from base_api.modules.errors import UnsupportedURLError
 from curl_cffi.requests import AsyncSession
 
+from video_downloader.application.provider_refusal import ProviderRefusal
+
 logger = logging.getLogger(__name__)
 
 #: `VideoStreamingPlaylistType.HLS` in PeerTube's own enum. The API also returns
@@ -87,7 +89,7 @@ class PeerTubeExtractionError(PeerTubeError):
     """
 
 
-class PeerTubeNoSupportedSourceError(PeerTubeExtractionError):
+class PeerTubeNoSupportedSourceError(PeerTubeExtractionError, ProviderRefusal):
     """The answer was readable, but nothing in it is downloadable.
 
     Its own type because the two ways to get here need telling apart in a log:
@@ -98,7 +100,7 @@ class PeerTubeNoSupportedSourceError(PeerTubeExtractionError):
     """
 
 
-class PeerTubeDownloadDisabledError(PeerTubeError):
+class PeerTubeDownloadDisabledError(PeerTubeError, ProviderRefusal):
     """The instance states the video may not be downloaded.
 
     Deliberately not an extraction error: nothing failed. `downloadEnabled` is
