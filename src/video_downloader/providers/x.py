@@ -25,8 +25,10 @@ it with a plausible value:
   derives from the bitrate is not a substitute: measured against the real
   `Content-Range` totals on 2026-09-07 it overstated all four formats of one
   post, by 2.52x, 2.69x, 2.81x and 5.70x. So `expected_size` stays unset, which
-  costs a progress total the download then learns for itself, and avoids a
-  large-download question asked about a number that is wrong by a factor of six.
+  avoids a large-download question asked about a number that is wrong by a
+  factor of six. The real total is not lost with it: the download layer reads
+  it off the one request for the last byte it makes anyway, to find out whether
+  it can fetch the file itself - see `readable_total`.
 
 Resolution goes through the same yt-dlp the YouTube adapter uses, on the same
 terms - no cookies, no verbose, a redacting logger - because every reason for
