@@ -100,6 +100,13 @@ poe -C $repo build                      # debug build   -> dist\dev
 poe -C $repo release                    # release build -> dist\release
 ```
 
+Both builds produce a **directory**, not a single file - `dist\dev\VideoDownloader.Debug\`
+and `dist\release\VideoDownloader\`. A onefile executable unpacks its entire payload
+into `%TEMP%` on every start, and that payload is 644 MB: Qt WebEngine, which the login
+window needs because X only accepts a login on its own page, is 342 MB of it and pulls
+another 72 MB of Qt Quick and QML along. So distribution is a folder - a zip or an
+installer - and startup stays immediate.
+
 Standing inside the repo, drop the `-C $repo` and it is just `poe test`.
 
 Installing or refreshing the dependencies is the one command that still needs an

@@ -1,4 +1,17 @@
-# PyInstaller spec for the production (onefile, windowed) build.
+# PyInstaller spec for the production (onedir, windowed) build.
+#
+# A directory rather than one file, and the reason is measured. A onefile
+# executable unpacks its whole payload into %TEMP% on every start, and this
+# payload is 644 MB: Qt WebEngine alone is 342 MB (195 MB of
+# Qt6WebEngineCore.dll, 102 MB of .pak resources, 54 MB of translations) and it
+# drags 72 MB of Qt Quick and QML in with it. That is the login window - X only
+# accepts a login on its own page - and it is not optional, so the unpacking is
+# what had to go: several seconds of disk copying before the first window, every
+# single launch, for a payload that never changes.
+#
+# The cost of onedir is that distribution is a folder rather than a file, which
+# an installer or a zip answers. The debug build has always been onedir, so the
+# two now differ only in console and entry point.
 import os
 
 from PyInstaller.utils.hooks import collect_submodules
@@ -34,4 +47,5 @@ a = Analysis(
     hiddenimports=hiddenimports,
 )
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, a.binaries, a.datas, name="VideoDownloader", console=False)
+exe = EXE(pyz, a.scripts, exclude_binaries=True, name="VideoDownloader", console=False)
+coll = COLLECT(exe, a.binaries, a.datas, name="VideoDownloader")

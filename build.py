@@ -63,7 +63,7 @@ SMOKE_MARKER = "VideoDownloader smoke OK"
 ARTIFACTS = {
     # mode -> path of the executable this mode's spec actually produces
     "dev": Path("dist") / "dev" / "VideoDownloader.Debug" / "VideoDownloader.Debug.exe",
-    "release": Path("dist") / "release" / "VideoDownloader.exe",
+    "release": Path("dist") / "release" / "VideoDownloader" / "VideoDownloader.exe",
 }
 
 
@@ -116,7 +116,7 @@ def smoke_test_artifact(mode: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="Reproducible Build Orchestrator")
-    parser.add_argument("mode", choices=["dev", "release"], help="Build mode: 'dev' for fast directory builds, 'release' for clean single-file executables.")
+    parser.add_argument("mode", choices=["dev", "release"], help="Build mode: 'dev' for a fast directory build, 'release' for a clean directory build.")
     parser.add_argument("--skip-tests", action="store_true", help="Skip the test suite.")
     parser.add_argument("--clean", action="store_true", help="Force a clean build by deleting caches and intermediate files.")
     
