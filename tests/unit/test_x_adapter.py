@@ -19,6 +19,7 @@ filled in from the extension, the dimensions or arithmetic.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -438,6 +439,26 @@ async def test_a_described_post_without_video_stays_a_post_without_video():
 
     with pytest.raises(XNoSupportedSourceError):
         await XAdapter(resolver=lambda url: payload).resolve(POST_URL)
+
+
+@pytest.mark.asyncio
+async def test_the_resolution_never_runs_on_the_thread_that_awaits_it():
+    """A resolution on the event loop thread is a frozen window.
+
+    yt-dlp is synchronous and one post was measured at 2.4 s: on the GUI's loop
+    thread that is 2.4 s in which nothing repaints and no click is answered,
+    and the freeze watchdog reported exactly that.
+    """
+    payload = load("x_post.json")
+    resolved_on: list[threading.Thread] = []
+
+    def resolver(url: str) -> dict:
+        resolved_on.append(threading.current_thread())
+        return payload
+
+    await XAdapter(resolver=resolver).resolve(POST_URL)
+
+    assert resolved_on and resolved_on[0] is not threading.current_thread()
 
 
 @pytest.mark.asyncio

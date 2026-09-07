@@ -30,7 +30,9 @@ it with a plausible value:
 
 Resolution goes through the same yt-dlp the YouTube adapter uses, on the same
 terms - no cookies, no verbose, a redacting logger - because every reason for
-those is about the resolver rather than about the site.
+those is about the resolver rather than about the site. It runs in a worker
+thread: the resolution of one post was measured at 2.4 s, and `resolve` is
+awaited on the thread that draws the window.
 
 The one thing X does not state is why it will not hand a post over. A post the
 site shows only to a signed-in viewer comes back as a tombstone with no reason
@@ -41,6 +43,7 @@ apart here rather than repeated; see `_refuse_withheld`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Optional
@@ -306,7 +309,14 @@ class XAdapter:
         if post_id is None:
             raise UnsupportedURLError(f"Not a supported X post URL: {url}")
 
-        info = self._extract(url)
+        # yt-dlp is synchronous and `resolve` is awaited on the GUI's event
+        # loop thread: measured on 2026-09-07 one post cost 2.4 s there - a
+        # guest token, a GraphQL call, and on the first resolution of a process
+        # the import of yt_dlp itself - and the watchdog reported the UI frozen
+        # for every one of those seconds. The fetch has run in a worker thread
+        # for exactly this reason since it was written; resolution is no
+        # different, and it is the half a user waits on first.
+        info = await asyncio.to_thread(self._extract, url)
         if not isinstance(info, dict):
             # Checked here rather than in `_extract`, so it holds for an
             # injected resolver too: nothing below may assume a shape.

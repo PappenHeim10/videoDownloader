@@ -37,6 +37,7 @@ Two things this file must never do, both learned from measurement:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Optional
@@ -309,7 +310,11 @@ class YouTubeAdapter:
         if video_id is None:
             raise UnsupportedURLError(f"Not a supported YouTube video URL: {url}")
 
-        info = self._extract(url)
+        # In a worker thread for the reason the X adapter measured on
+        # 2026-09-07: yt-dlp is synchronous, `resolve` is awaited on the thread
+        # that draws the window, and a resolution there froze the UI for as
+        # long as it took. The fetch has always run off the loop; so does this.
+        info = await asyncio.to_thread(self._extract, url)
         if not isinstance(info, dict):
             # Checked here rather than in `_extract`, so it holds for an
             # injected resolver too: nothing below may assume a shape.
