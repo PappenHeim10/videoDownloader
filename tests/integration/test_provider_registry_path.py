@@ -65,6 +65,18 @@ YOUTUBE_URLS = (
     "https://www.youtube.com/watch?v=tEwb4cuFjKE&list=PLabc&index=2",
     "https://www.youtube.com/playlist?list=PLabc",
 )
+#: Every X form the adapter claims. The near-miss worth guarding is the direct
+#: adapter: a post link carries no file extension, so nothing else may claim it.
+X_URLS = (
+    "https://x.com/example_poster/status/2096518350553940450",
+    "https://twitter.com/example_poster/status/2096518350553940450",
+    "https://mobile.twitter.com/example_poster/status/2096518350553940450",
+    "https://x.com/example_poster/status/2096518350553940450/video/1",
+    "https://x.com/i/status/2096518350553940450",
+    "https://x.com/i/web/status/2096518350553940450",
+    "https://x.com/example_poster",
+)
+
 UNSUPPORTED_URL = "https://example.com/watch?v=abc"
 
 
@@ -206,7 +218,7 @@ async def test_the_production_registry_is_not_ambiguous_about_any_url(monkeypatc
     session = create_provider_session()
     try:
         assert session.registry._providers  # composition actually happened
-        for url in (XHAMSTER_URL, PEERTUBE_URL, DIRECT_URL, *YOUTUBE_URLS):
+        for url in (XHAMSTER_URL, PEERTUBE_URL, DIRECT_URL, *YOUTUBE_URLS, *X_URLS):
             claiming = [type(p).__name__ for p in session.registry._providers if p.supports(url)]
             assert len(claiming) == 1, f"{url} claimed by {claiming}"
     finally:
@@ -491,6 +503,7 @@ def test_the_production_registry_registers_every_adapter():
             "XHamsterAdapter",
             "PeerTubeAdapter",
             "YouTubeAdapter",
+            "XAdapter",
             "DirectMediaAdapter",
         }
     finally:

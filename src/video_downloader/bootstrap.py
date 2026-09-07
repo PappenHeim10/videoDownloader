@@ -22,7 +22,7 @@ from video_downloader.application.provider_session import ProviderSession
 from video_downloader.domain.download_job import DownloadJob
 from video_downloader.infrastructure.paths import AppPaths
 from video_downloader.infrastructure.settings import AppSettings
-from video_downloader.providers import PeerTubeAdapter, YouTubeAdapter
+from video_downloader.providers import PeerTubeAdapter, XAdapter, YouTubeAdapter
 from video_downloader.ui.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -32,10 +32,18 @@ logger = logging.getLogger(__name__)
 #: components - which is the thing a build needs proven.
 SMOKE_MARKER = "VideoDownloader smoke OK"
 
-#: Printed by `--smoke-test` once the YouTube extractor has been reached.
-#: Separate from the marker above because it proves a different thing, and
-#: because only one of the two can fail in a frozen build.
+#: Printed by `--smoke-test` once every yt-dlp extractor this application needs
+#: has been reached. Separate from the marker above because it proves a
+#: different thing, and because only one of the two can fail in a frozen build.
 EXTRACTOR_MARKER = "VideoDownloader extractors OK"
+
+#: The extractors this application resolves through, each with a URL it must
+#: claim. yt-dlp names them itself; the URLs are the cheapest possible proof
+#: that the named extractor is the one that answers.
+REQUIRED_EXTRACTORS = {
+    "Youtube": "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+    "Twitter": "https://x.com/example/status/1234567890123456789",
+}
 
 #: Frameworks whose DEBUG output is about their own plumbing rather than about
 #: this application. Named explicitly so raising our level never raises theirs.
@@ -46,22 +54,25 @@ THIRD_PARTY_LOG_LEVELS = {
 
 
 def verify_extractors() -> None:
-    """Prove the artifact can reach the extractor it needs, not merely import it.
+    """Prove the artifact can reach the extractors it needs, not merely import them.
 
     yt-dlp resolves extractors by name at run time, so nothing in the import
     graph points at them. A frozen build without them imports `yt_dlp` happily
-    and then reports every YouTube URL as unsupported - a failure that exists
-    only in the artifact and never in a source run, which is exactly the kind
-    the smoke test is for.
+    and then reports every YouTube or X URL as unsupported - a failure that
+    exists only in the artifact and never in a source run, which is exactly the
+    kind the smoke test is for.
 
     Asked through yt-dlp's own registry rather than by importing a module path,
     because the path has moved between releases and the registry has not.
     """
     from yt_dlp.extractor import get_info_extractor
 
-    extractor = get_info_extractor("Youtube")
-    if not extractor.suitable("https://www.youtube.com/watch?v=aaaaaaaaaaa"):
-        raise RuntimeError("The bundled YouTube extractor does not claim a watch URL")
+    for name, url in REQUIRED_EXTRACTORS.items():
+        extractor = get_info_extractor(name)
+        if not extractor.suitable(url):
+            raise RuntimeError(
+                f"The bundled {name} extractor does not claim its own URL form"
+            )
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -109,6 +120,7 @@ def create_provider_session() -> ProviderSession:
     registry.register(XHamsterAdapter())
     registry.register(PeerTubeAdapter())
     registry.register(YouTubeAdapter())
+    registry.register(XAdapter())
     registry.register(DirectMediaAdapter())
     return ProviderSession(registry=registry, core=core)
 
