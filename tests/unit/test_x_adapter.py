@@ -114,6 +114,7 @@ def test_a_url_that_is_not_a_post_is_not_claimed(url):
         "https://x.com/explore",
         "https://x.com/hashtag/cats",
         "https://x.com/i/lists/12345",
+        "https://x.com/i/anything-else",
         "https://x.com/",
     ],
 )
@@ -125,6 +126,58 @@ def test_a_profile_or_feed_is_claimed_so_the_refusal_can_say_why(url):
     assert XAdapter().supports(url) is True
     with pytest.raises(XUnsupportedTargetError):
         _canonical_post_id(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://x.com/i/spaces/1YpKkZQwlbBxj",
+        "https://twitter.com/i/spaces/1YpKkZQwlbBxj",
+        "https://x.com/i/broadcasts/1abcdEFGH2345",
+    ],
+)
+def test_a_space_is_refused_as_live_rather_than_as_a_missing_post(url):
+    """`/i/spaces/<id>` is the link someone pastes *for* a Space.
+
+    It names one directly and never resolves to a post, so the live check that
+    runs after a resolution can never see it - which left the one sentence that
+    fits ("live is not supported") reachable only for a post that happens to be
+    live, and gave a Space the generic "this names no single post" instead.
+    """
+    assert XAdapter().supports(url) is True
+    with pytest.raises(XLiveNotSupportedError):
+        _canonical_post_id(url)
+
+
+@pytest.mark.asyncio
+async def test_a_space_is_refused_before_anything_is_resolved():
+    with pytest.raises(XLiveNotSupportedError):
+        await adapter_raising(AssertionError("must not resolve")).resolve(
+            "https://x.com/i/spaces/1YpKkZQwlbBxj"
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://x.com/",
+        "https://x.com/example_poster",
+        "https://x.com/home",
+        "https://x.com/i/spaces/1YpKkZQwlbBxj",
+        "https://x.com/i/broadcasts/1abcdEFGH2345",
+        "https://x.com/i/anything-else",
+        "https://x.com/example_poster/status/2096518350553940450",
+        "https://example.com/not-ours",
+    ],
+)
+def test_supports_answers_rather_than_raising(url):
+    """The registry asks every adapter about every URL a user pastes.
+
+    An exception escaping here would fail a link that belongs to some other
+    adapter entirely, so every refusal this adapter can name has to come back
+    as "yes, mine" and be explained by `resolve`.
+    """
+    assert XAdapter().supports(url) in (True, False)
 
 
 def test_supports_never_reaches_the_network(monkeypatch):

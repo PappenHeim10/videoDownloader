@@ -74,6 +74,15 @@ _COLLECTION_PREFIXES = (
 #: The status forms under X's internal `/i/` namespace.
 _INTERNAL_POST_PATHS = (("i", "status"), ("i", "web", "status"))
 
+#: What X calls its live formats, also under `/i/`. Named here so a pasted Space
+#: link is refused as a Space: it is a live audio room, and the sentence a user
+#: needs is that live is not supported, not that the link names no single post.
+_LIVE_SEGMENTS = ("spaces", "broadcasts")
+
+#: Said in two places - to a link that names a live format, and to a post that
+#: turns out to be one - so the two cannot drift apart.
+_LIVE_REFUSAL = "Live-Uebertragungen und Spaces werden nicht unterstuetzt."
+
 #: Protocols this application can hand to a downloader as one file. The `hls-*`
 #: entries arrive as `m3u8_native` and are excluded by this.
 _FETCHABLE_PROTOCOLS = frozenset({"https", "http"})
@@ -134,8 +143,9 @@ def _canonical_post_id(url: str) -> Optional[str]:
     """The numeric post id iff `url` names one post, else `None`.
 
     Pure parsing: no network, no side effects, the same answer every time.
-    Raises `XUnsupportedTargetError` for an X URL that names a profile or a
-    feed - those are ours to refuse with a reason, not to silently disown.
+    Raises rather than returning `None` for an X URL whose target this adapter
+    recognises and declines - a profile, a feed, a Space - because those are
+    ours to refuse with a reason rather than to silently disown.
     """
     try:
         parts = urlsplit(url)
@@ -160,6 +170,12 @@ def _canonical_post_id(url: str) -> Optional[str]:
         for prefix in _INTERNAL_POST_PATHS:
             if tuple(lowered[:len(prefix)]) == prefix and len(segments) > len(prefix):
                 return _post_id(segments[len(prefix)])
+        if len(segments) > 1 and lowered[1] in _LIVE_SEGMENTS:
+            # Refused here rather than after a resolution, because this is the
+            # link someone actually pastes for a Space: `/i/spaces/<id>` names
+            # one directly, and never resolves to a post that `_refuse_
+            # unplayable` could recognise as live.
+            raise XLiveNotSupportedError(_LIVE_REFUSAL)
         raise XUnsupportedTargetError(
             "Dieser X-Link zeigt auf keinen einzelnen Beitrag."
         )
@@ -242,12 +258,18 @@ class XAdapter:
         self._resolver = resolver
 
     def supports(self, url: str) -> bool:
-        """Whether this adapter claims `url`. Cheap, synchronous, network-free."""
+        """Whether this adapter claims `url`. Cheap, synchronous, network-free.
+
+        Every refusal the parser can already name is caught, not just one kind.
+        A profile or a Space URL is ours: claiming it is what lets `resolve` say
+        why it is declined instead of the registry saying "unsupported". Catching
+        the base class also keeps this method total, which it has to be - the
+        registry calls it for every adapter on every URL a user pastes, so an
+        exception escaping here would fail links belonging to somebody else.
+        """
         try:
             return _canonical_post_id(url) is not None
-        except XUnsupportedTargetError:
-            # A profile URL is ours - claiming it is what lets `resolve` say why
-            # it is refused instead of the registry saying "unsupported".
+        except XError:
             return True
 
     async def resolve(self, url: str) -> Media:
@@ -371,9 +393,7 @@ class XAdapter:
         if info.get("is_live") or info.get("live_status") in (
             "is_live", "is_upcoming", "post_live"
         ):
-            raise XLiveNotSupportedError(
-                "Live-Uebertragungen und Spaces werden nicht unterstuetzt."
-            )
+            raise XLiveNotSupportedError(_LIVE_REFUSAL)
 
     @staticmethod
     def _source_from_format(entry: dict, post_id: str) -> Optional[MediaSource]:

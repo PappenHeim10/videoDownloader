@@ -75,6 +75,7 @@ X_URLS = (
     "https://x.com/i/status/2096518350553940450",
     "https://x.com/i/web/status/2096518350553940450",
     "https://x.com/example_poster",
+    "https://x.com/i/spaces/1YpKkZQwlbBxj",
 )
 
 UNSUPPORTED_URL = "https://example.com/watch?v=abc"
