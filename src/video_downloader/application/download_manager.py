@@ -58,6 +58,7 @@ class DownloadManager:
         quality: str | int = "best",
         remux: bool = True,
         output_dir: str | Path | None = None,
+        confirm_large_download: Callable[[DownloadJob, int], bool] | None = None,
     ) -> DownloadJob:
         if self._shutdown:
             raise RuntimeError("DownloadManager ist bereits beendet")
@@ -72,7 +73,16 @@ class DownloadManager:
                 "Waehle eines in der GUI oder uebergib output_dir."
             )
 
-        job = DownloadJob(url=url, quality=quality, output_dir=target, remux=remux)
+        # Passed in per job rather than held by the manager: only a caller with
+        # a window can ask a question, and the manager runs headless just as
+        # often as it runs behind one.
+        job = DownloadJob(
+            url=url,
+            quality=quality,
+            output_dir=target,
+            remux=remux,
+            confirm_large_download=confirm_large_download,
+        )
         self._jobs[job.id] = job
         logger.info("[JOB %s] Download added url=%s quality=%s remux=%s", job.id, job.url, job.quality, job.remux)
         job.transition(LifecycleState.QUEUED)

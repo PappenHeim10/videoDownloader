@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QPushButton, QProgressBar, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QPushButton, QProgressBar, QVBoxLayout, QWidget,
 )
 
 from video_downloader.domain.download_job import DownloadJob, LifecycleState, ProgressUnit
@@ -183,10 +183,41 @@ class MainWindow(QMainWindow):
             return
 
         job = self.manager.add_download(
-            url, self.quality.text().strip() or "best", output_dir=directory
+            url,
+            self.quality.text().strip() or "best",
+            output_dir=directory,
+            confirm_large_download=self.confirm_large_download,
         )
         self.add_item(job)
         self.url.clear()
+
+    def confirm_large_download(self, job: DownloadJob, estimated_bytes: int) -> bool:
+        """Ask before starting a download large enough to be worth a question.
+
+        Asked once, before the first byte, because that is the only moment the
+        answer can still save anything. The size is the provider's estimate, so
+        the wording says "about" rather than pretending to a precision it does
+        not have.
+
+        Runs on the Qt thread - the job coroutine lives on the same loop the
+        window does - so a modal is safe here and blocks nothing but itself.
+        """
+        gib = estimated_bytes / 1024 ** 3
+        answer = QMessageBox.question(
+            self,
+            "Grosser Download",
+            f"""„{job.title or job.url}“ ist etwa {gib:.1f} GiB gross.
+
+Fortfahren?""",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        confirmed = answer == QMessageBox.StandardButton.Yes
+        if not confirmed:
+            self.statusBar().showMessage(
+                f"Download abgebrochen: {gib:.1f} GiB waren zu viel.", 5000
+            )
+        return confirmed
 
     def add_item(self, job: DownloadJob):
         item = QListWidgetItem(self.list)
