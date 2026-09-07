@@ -31,6 +31,12 @@ it with a plausible value:
 Resolution goes through the same yt-dlp the YouTube adapter uses, on the same
 terms - no cookies, no verbose, a redacting logger - because every reason for
 those is about the resolver rather than about the site.
+
+The one thing X does not state is why it will not hand a post over. A post the
+site shows only to a signed-in viewer comes back as a tombstone with no reason
+attached, and the resolver reports that as "no video could be found in this
+tweet" - the same words it uses for a post of plain text. Those two are told
+apart here rather than repeated; see `_refuse_withheld`.
 """
 
 from __future__ import annotations
@@ -93,6 +99,28 @@ _FETCHABLE_PROTOCOLS = frozenset({"https", "http"})
 #: component of what it is handed, so "Poster - https://t.co/abc" arrives on
 #: disk as "abc.mp4" - a file named after a shortener token nobody can read.
 _SHORTENED_LINK = re.compile(r"https?://t\.co/\S*")
+
+#: Said to a post X refuses to describe at all. Measured on 2026-09-07 against a
+#: post the site itself shows only to a signed-in viewer: the GraphQL answer is
+#: `{"tweetResult": {"result": {"__typename": "TweetTombstone"}}}` and the
+#: syndication endpoint says the same, neither of them stating a reason. So the
+#: sentence names every reason it can be, because X named none of them - and it
+#: is emphatically not "this post has no video", which is what the resolver
+#: reports for it and what a user would act on by deleting the link.
+_WITHHELD_REFUSAL = (
+    "X gibt diesen Beitrag ohne Anmeldung nicht heraus - er ist "
+    "altersbeschraenkt, geschuetzt oder geloescht."
+)
+
+#: The fields yt-dlp fills from X's own description of a post. A post X really
+#: described states at least one of them; the tombstone above states none, and
+#: that is the whole difference between "no video in this post" and "X said
+#: nothing about this post". Matched on emptiness rather than on the tombstone
+#: itself, because the tombstone never reaches this layer: the resolver turns
+#: it into an ordinary answer with no formats and no facts.
+_DESCRIBED_FIELDS = (
+    "uploader", "uploader_id", "channel_id", "timestamp", "description", "duration",
+)
 
 
 class XError(Exception):
@@ -290,6 +318,10 @@ class XAdapter:
 
         formats = [entry for entry in (info.get("formats") or []) if _fetchable(entry)]
         if not formats:
+            # Asked only here. With a format in hand it makes no difference what
+            # X said about the post; without one it is the whole difference
+            # between the two sentences.
+            self._refuse_withheld(info)
             raise XNoSupportedSourceError("Dieser Beitrag enthaelt kein Video.")
 
         sources = [
@@ -348,7 +380,18 @@ class XAdapter:
         from yt_dlp.utils import DownloadError, ExtractorError, GeoRestrictedError
 
         try:
-            with YoutubeDL(base_options(skip_download=True)) as resolver:
+            with YoutubeDL(
+                base_options(
+                    skip_download=True,
+                    # A post with no format is an answer to be read, not a
+                    # failure: only what X said *besides* the formats tells a
+                    # text-or-photo post apart from one X withheld entirely,
+                    # and the exception this suppresses carries none of it.
+                    # Every other failure still raises, and still goes through
+                    # `_classify` below.
+                    ignore_no_formats_error=True,
+                )
+            ) as resolver:
                 info = resolver.extract_info(url, download=False)
         except GeoRestrictedError as error:
             raise XUnavailableError("In dieser Region nicht verfuegbar.") from error
@@ -386,6 +429,20 @@ class XAdapter:
         if "not found" in lowered or "unavailable" in lowered or "deleted" in lowered:
             return XExtractionError("Beitrag nicht gefunden oder geloescht.")
         return XExtractionError(f"X could not be resolved: {error}")
+
+    @staticmethod
+    def _refuse_withheld(info: dict) -> None:
+        """Refuse a post X declined to describe, as that rather than as empty.
+
+        Decided from the absence of every field X would have stated, not from
+        the tombstone that caused it: the tombstone never reaches this layer -
+        the resolver has already turned it into an ordinary answer with no
+        formats and no facts - and reading it from the answer's own shape is
+        what makes this hold for an injected resolver too.
+        """
+        if any(info.get(field) for field in _DESCRIBED_FIELDS):
+            return
+        raise XUnavailableError(_WITHHELD_REFUSAL)
 
     @staticmethod
     def _refuse_unplayable(info: dict) -> None:

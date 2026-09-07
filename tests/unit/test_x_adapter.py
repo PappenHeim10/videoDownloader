@@ -5,7 +5,9 @@ media URLs replaced by synthetic ones and the account anonymised - the parts
 that could not go into a repository - and reduced to the fields the adapter
 reads. `x_post_hls_only.json` is the same answer with the progressive entries
 removed, which is what a post whose video X publishes only as a playlist looks
-like.
+like. `x_post_withheld.json` is what X answers for a post it shows only to a
+signed-in viewer: an answer with no formats and no facts at all, recorded field
+for field on 2026-09-07 with the post id anonymised.
 
 The cases that carry weight are the ones where the obvious shortcut invents a
 fact: X states no codecs on the files it *can* hand over, no quality label at
@@ -410,6 +412,32 @@ async def test_a_profile_url_is_refused_with_its_own_sentence():
 async def test_a_post_with_only_playlist_renditions_is_reported_as_such():
     with pytest.raises(XNoSupportedSourceError):
         await adapter_for("x_post_hls_only.json").resolve(POST_URL)
+
+
+@pytest.mark.asyncio
+async def test_a_post_x_withheld_is_not_reported_as_a_post_without_video():
+    """The two are one sentence in the resolver and must not be one here.
+
+    X answers a post it shows only to a signed-in viewer with a tombstone that
+    states no reason, and yt-dlp reports that as "no video could be found in
+    this tweet" - the words it also uses for a post of plain text. Told apart,
+    because the difference decides what the user does next: a post with no
+    video is a link to discard, and this one is not.
+    """
+    with pytest.raises(XUnavailableError) as refusal:
+        await adapter_for("x_post_withheld.json").resolve(POST_URL)
+
+    assert "Anmeldung" in str(refusal.value)
+
+
+@pytest.mark.asyncio
+async def test_a_described_post_without_video_stays_a_post_without_video():
+    """The other half of the pair: X described this one, and it has no video."""
+    payload = load("x_post.json")
+    payload["formats"] = []
+
+    with pytest.raises(XNoSupportedSourceError):
+        await XAdapter(resolver=lambda url: payload).resolve(POST_URL)
 
 
 @pytest.mark.asyncio
