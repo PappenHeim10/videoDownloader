@@ -261,7 +261,7 @@ async def test_an_hls_transport_error_does_not_retry_on_the_progressive_file(tmp
     )
 
     assert job.state == LifecycleState.FAILED
-    assert "ConnectionError" in (job.error or "")
+    assert "ConnectionError" in str(job.error or "")
     assert len(core.configurations) == 1
 
 
@@ -276,7 +276,7 @@ async def test_a_dash_only_media_is_still_an_unsupported_protocol(tmp_path):
     )
 
     assert job.state == LifecycleState.FAILED
-    assert UnsupportedProtocolError.__name__ in (job.error or "")
+    assert UnsupportedProtocolError.__name__ in str(job.error or "")
     assert core.configurations == []
 
 

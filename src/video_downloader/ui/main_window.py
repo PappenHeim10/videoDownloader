@@ -69,21 +69,40 @@ def progress_details(job: DownloadJob) -> str:
 
 
 class DownloadItem(QFrame):
-    def __init__(self, job: DownloadJob, manager: DownloadManager, delete_callback, parent=None):
+    def __init__(
+        self,
+        job: DownloadJob,
+        manager: DownloadManager,
+        delete_callback,
+        cancel_callback=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.job = job
         self.manager = manager
         self._closing = False
         self.bridge = JobBridge(self)
         self.bridge.changed.connect(self.refresh)
-        job.on_change = self.bridge.changed.emit
+        # Registriert statt zugewiesen. Der Unterschied ist nicht kosmetisch:
+        # solange es ein einzelnes Feld war, machte ein zweites Widget fuer
+        # denselben Job das erste stumm, und `detach()` unten haette nichts
+        # gehabt, woran es sich abmelden koennte.
+        job.add_listener(self._job_changed)
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         self.title = QLabel()
+        cancel = QPushButton("Abbrechen")
+        cancel.setToolTip("Den Download stoppen. Die Datei bleibt liegen.")
+        cancel.clicked.connect(
+            lambda: asyncio.create_task((cancel_callback or self._cancel)(job))
+        )
+        self.cancel_button = cancel
         remove = QPushButton("X")
         remove.setFixedWidth(32)
+        remove.setToolTip("Den Eintrag und seine Datei entfernen.")
         remove.clicked.connect(lambda: asyncio.create_task(delete_callback(job)))
         header.addWidget(self.title)
+        header.addWidget(cancel)
         header.addWidget(remove)
         layout.addLayout(header)
         self.status = QLabel()
@@ -91,6 +110,28 @@ class DownloadItem(QFrame):
         self.progress = QProgressBar()
         layout.addWidget(self.progress)
         self.refresh(job)
+
+    def _job_changed(self, job: DownloadJob) -> None:
+        """Der Uebergang in den Qt-Thread.
+
+        Die Signalverbindung ist hier absichtlich weiterhin im Spiel, obwohl der
+        Kern seine Aenderungen inzwischen selbst auf dem Loop serialisiert: sie
+        kostet nichts und haelt das Fenster auch dann korrekt, wenn ein Job
+        ohne gebundenen Loop benachrichtigt - ein Einheitstest etwa.
+        """
+        self.bridge.changed.emit(job)
+
+    def detach(self) -> None:
+        """Diesen Eintrag vom Job abmelden.
+
+        Ohne das blieb das Widget als Beobachter haengen, nachdem es aus der
+        Liste genommen war - eine Benachrichtigung danach lief in ein Objekt,
+        dessen C++-Haelfte Qt bereits geloescht haben konnte.
+        """
+        self.job.remove_listener(self._job_changed)
+
+    async def _cancel(self, job: DownloadJob) -> None:
+        await self.manager.cancel_download(job)
 
     def mouseReleaseEvent(self, event):
         if self.job.state == LifecycleState.COMPLETED and self.job.output_file:
@@ -111,7 +152,10 @@ class DownloadItem(QFrame):
         else:
             self.progress.setRange(0, 100)
             self.progress.setValue(round(job.progress))
-        self.status.setToolTip(job.error or "")
+        self.status.setToolTip(str(job.error) if job.error is not None else "")
+        # Ein Eintrag aus dem Verzeichnisscan laeuft nicht, und ein fertiger
+        # Job auch nicht - beiden waere mit "Abbrechen" nicht gedient.
+        self.cancel_button.setVisible(not job.from_disk and not job.is_finished)
 
 
 class MainWindow(QMainWindow):
@@ -192,7 +236,12 @@ class MainWindow(QMainWindow):
             return None
         # Future jobs only. Running and finished jobs keep the directory they
         # were created with, so nothing moves under the user's feet.
-        return self.settings.set_download_directory(chosen)
+        directory = self.settings.set_download_directory(chosen)
+        # Die Liste zeigte bis hierher die Dateien des alten Ordners weiter - sie
+        # beschrieb ein Verzeichnis, in das nichts mehr geschrieben wird.
+        self.manager.rescan_output_directory(directory)
+        self.rebuild_list()
+        return directory
 
     def _run(self, coroutine) -> None:
         """Start a coroutine a menu entry asked for.
@@ -276,7 +325,7 @@ class MainWindow(QMainWindow):
         self.add_item(job)
         self.url.clear()
 
-    def confirm_large_download(self, job: DownloadJob, estimated_bytes: int) -> bool:
+    async def confirm_large_download(self, job: DownloadJob, estimated_bytes: int) -> bool:
         """Ask before starting a download large enough to be worth a question.
 
         Asked once, before the first byte, because that is the only moment the
@@ -284,20 +333,42 @@ class MainWindow(QMainWindow):
         the wording says "about" rather than pretending to a precision it does
         not have.
 
-        Runs on the Qt thread - the job coroutine lives on the same loop the
-        window does - so a modal is safe here and blocks nothing but itself.
+        Gezeigt statt `exec`-t, aus demselben Grund wie das Anmeldefenster: ein
+        `exec` fuehrt eine geschachtelte Qt-Schleife, und waehrend jemand
+        ueberlegt, sollen die anderen Downloads weiterlaufen und ihren
+        Fortschritt melden. Wird der fragende Job in der Zwischenzeit
+        abgebrochen, raeumt das `finally` das Fenster weg, statt es
+        herrenlos stehen zu lassen.
         """
         gib = estimated_bytes / 1024 ** 3
-        answer = QMessageBox.question(
-            self,
-            "Grosser Download",
+        box = QMessageBox(self)
+        box.setWindowTitle("Grosser Download")
+        box.setText(
             f"""„{job.title or job.url}“ ist etwa {gib:.1f} GiB gross.
 
-Fortfahren?""",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+Fortfahren?"""
         )
-        confirmed = answer == QMessageBox.StandardButton.Yes
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+
+        answer: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+        def settle(result: int) -> None:
+            if not answer.done():
+                answer.set_result(result)
+
+        box.finished.connect(settle)
+        box.open()
+        try:
+            # Ein Fenster, das ohne Antwort geschlossen wird, liefert 0 - und
+            # damit dasselbe wie Nein, was die Vorbelegung ohnehin war.
+            confirmed = await answer == int(QMessageBox.StandardButton.Yes)
+        finally:
+            box.close()
+            box.deleteLater()
+
         if not confirmed:
             self.statusBar().showMessage(
                 f"Download abgebrochen: {gib:.1f} GiB waren zu viel.", 5000
@@ -310,14 +381,37 @@ Fortfahren?""",
         item.setSizeHint(widget.sizeHint())
         self.list.setItemWidget(item, widget)
 
-    async def delete_item(self, job: DownloadJob):
-        await self.manager.delete_download(job)
+    def take_item(self, job: DownloadJob) -> None:
+        """Nimm den Eintrag dieses Jobs aus der Liste - und melde ihn ab."""
         for index in range(self.list.count()):
             item = self.list.item(index)
             widget = self.list.itemWidget(item)
             if widget is not None and widget.job is job:
+                widget.detach()
                 self.list.takeItem(index)
                 break
+
+    def rebuild_list(self) -> None:
+        """Baue die Liste aus dem auf, was der Manager jetzt fuehrt.
+
+        Jeder bestehende Eintrag meldet sich vorher ab. Ohne das haette ein
+        Neuaufbau genau den Beobachter-Ueberhang erzeugt, den `detach()`
+        verhindern soll - nur eben fuer die ganze Liste auf einmal.
+        """
+        for index in range(self.list.count()):
+            widget = self.list.itemWidget(self.list.item(index))
+            if widget is not None:
+                widget.detach()
+        self.list.clear()
+        for job in self.manager.get_jobs():
+            self.add_item(job)
+
+    async def delete_item(self, job: DownloadJob):
+        # `delete_file=True` ist genau das bisherige Verhalten dieses Knopfes.
+        # Es steht jetzt hier statt in der Vorbelegung des Managers, damit die
+        # Entscheidung an der Stelle sichtbar ist, an der sie getroffen wird.
+        await self.manager.delete_download(job, delete_file=True)
+        self.take_item(job)
 
     def closeEvent(self, event):
         if self._shutdown_done:

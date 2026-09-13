@@ -88,6 +88,11 @@ class _Phase:
     name: str
     weight: int
     done: int = 0
+    #: Diese Phase hat keine eigene Groesse - sie wiegt, was die anderen wiegen.
+    #: Das Muxen ist die einzige: es liest beide Spuren, also kostet es
+    #: ungefaehr, was beide zusammen wiegen, und das steht erst fest, wenn beide
+    #: gewogen sind.
+    derived: bool = False
 
 
 class _AggregateProgress:
@@ -107,7 +112,6 @@ class _AggregateProgress:
     def __init__(self, phases: list[_Phase], report: Callable[[int, int], None]) -> None:
         self._phases = phases
         self._report = report
-        self._total = sum(phase.weight for phase in phases) or 0
 
     def callback_for(self, name: str) -> Callable[[int, int], None]:
         phase = next(phase for phase in self._phases if phase.name == name)
@@ -116,7 +120,6 @@ class _AggregateProgress:
             if not phase.weight and total > 0:
                 # Nobody could estimate this one; the download just measured it.
                 phase.weight = total
-                self._total = sum(other.weight for other in self._phases)
             # A phase may learn its real size mid-flight; an estimated weight
             # stays what it was, so one phase cannot push the bar past 100%.
             phase.done = min(done, phase.weight) if phase.weight else done
@@ -127,12 +130,39 @@ class _AggregateProgress:
     def complete(self, name: str) -> None:
         for phase in self._phases:
             if phase.name == name:
+                if not phase.weight:
+                    # Niemand hat sie vorher gewogen; was ankam, ist jetzt die
+                    # einzige belegte Zahl und damit ihr Gewicht.
+                    phase.weight = phase.done
                 phase.done = phase.weight
         self._emit()
 
+    def _denominator(self) -> int:
+        """Der Gesamtwert - oder 0, solange eine Phase ungewogen ist.
+
+        Frueher war der Nenner die Summe der bereits bekannten Gewichte. Das
+        las sich harmlos und lief messbar rueckwaerts: bei zwei ungewogenen
+        Spuren stand der Balken auf 100 %, sobald die erste fertig war, und fiel
+        auf 87,5 %, sobald die zweite ihre Groesse lernte.
+
+        Eine Null ist hier keine fehlende Angabe, sondern eine Aussage: sie
+        heisst "Ende unbekannt", genau wie `DownloadJob.has_known_total` sie
+        liest, und die Oberflaeche zeichnet dafuer einen unbestimmten Balken
+        statt eines Prozentsatzes, der sich noch verschiebt.
+        """
+        measured = [phase for phase in self._phases if not phase.derived]
+        if not measured or any(phase.weight <= 0 for phase in measured):
+            return 0
+        base = sum(phase.weight for phase in measured)
+        for phase in self._phases:
+            if phase.derived:
+                phase.weight = base
+        return base + sum(phase.weight for phase in self._phases if phase.derived)
+
     def _emit(self) -> None:
+        total = self._denominator()
         done = sum(phase.done for phase in self._phases)
-        self._report(min(done, self._total) if self._total else done, self._total)
+        self._report(min(done, total) if total else done, total)
 
 
 def is_ytdlp(source: MediaSource) -> bool:
@@ -362,8 +392,10 @@ async def download_selection(
         for index, source in enumerate(sources)
     ]
     if selection.needs_muxing:
-        # The mux reads both tracks, so it is worth roughly what they weigh.
-        phases.append(_Phase(name="mux", weight=sum(p.weight for p in phases)))
+        # The mux reads both tracks, so it is worth roughly what they weigh -
+        # was erst feststeht, wenn beide gewogen sind. Deshalb abgeleitet statt
+        # hier einmal ausgerechnet.
+        phases.append(_Phase(name="mux", weight=0, derived=True))
     progress = _AggregateProgress(phases, report)
 
     paths: dict[str, Path] = {}

@@ -65,47 +65,82 @@ def test_the_window_hands_its_own_confirmer_to_every_job(window):
     assert kwargs["confirm_large_download"] == window.confirm_large_download
 
 
-def test_a_confirmed_download_is_allowed_to_start(window, monkeypatch, tmp_path):
-    asked: list[str] = []
+def answering(monkeypatch, button) -> dict:
+    """Beantworte den naechsten Dialog, ohne einen zu zeigen.
 
-    def question(parent, title, text, *args):
-        asked.append(text)
-        return QMessageBox.StandardButton.Yes
+    Das Fenster `exec`-t nicht mehr, sondern oeffnet und wartet auf `finished` -
+    damit die uebrigen Downloads weiterlaufen. Getestet wird deshalb an
+    `open()`: es haelt fest, was gefragt wurde, und antwortet sofort.
+    """
+    captured: dict[str, object] = {}
 
-    monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
+    def open_(self) -> None:
+        captured["text"] = self.text()
+        captured["default"] = self.standardButton(self.defaultButton())
+        self.done(int(button))
+
+    monkeypatch.setattr(QMessageBox, "open", open_)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_download_is_allowed_to_start(window, monkeypatch, tmp_path):
+    asked = answering(monkeypatch, QMessageBox.StandardButton.Yes)
     job = DownloadJob(url="https://provider.test/x", quality="best", output_dir=tmp_path)
     job.title = "A Very Large Video"
 
-    assert window.confirm_large_download(job, 3 * 1024**3) is True
-    assert len(asked) == 1
-    assert "3.0 GiB" in asked[0], "the size is the whole point of the question"
-    assert "A Very Large Video" in asked[0], "and so is which video it is about"
+    assert await window.confirm_large_download(job, 3 * 1024**3) is True
+    assert "3.0 GiB" in asked["text"], "the size is the whole point of the question"
+    assert "A Very Large Video" in asked["text"], "and so is which video it is about"
 
 
-def test_a_refused_download_says_so_in_the_status_bar(window, monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        QMessageBox, "question",
-        staticmethod(lambda *args: QMessageBox.StandardButton.No),
-    )
+@pytest.mark.asyncio
+async def test_a_refused_download_says_so_in_the_status_bar(window, monkeypatch, tmp_path):
+    answering(monkeypatch, QMessageBox.StandardButton.No)
     job = DownloadJob(url="https://provider.test/x", quality="best", output_dir=tmp_path)
 
-    assert window.confirm_large_download(job, 4 * 1024**3) is False
+    assert await window.confirm_large_download(job, 4 * 1024**3) is False
     assert "4.0 GiB" in window.statusBar().currentMessage()
 
 
-def test_the_default_button_is_the_safe_one(window, monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_the_default_button_is_the_safe_one(window, monkeypatch, tmp_path):
     """A stray Enter must not start a four-gigabyte download."""
-    captured: dict[str, object] = {}
-
-    def question(parent, title, text, buttons, default):
-        captured["default"] = default
-        return default
-
-    monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
+    captured = answering(monkeypatch, QMessageBox.StandardButton.No)
     job = DownloadJob(url="https://provider.test/x", quality="best", output_dir=tmp_path)
 
-    assert window.confirm_large_download(job, 4 * 1024**3) is False
+    assert await window.confirm_large_download(job, 4 * 1024**3) is False
     assert captured["default"] == QMessageBox.StandardButton.No
+
+
+@pytest.mark.asyncio
+async def test_the_question_does_not_stop_the_loop(window, monkeypatch, tmp_path):
+    """Waehrend jemand ueberlegt, laeuft der Rest der Anwendung weiter.
+
+    Der Beweis ist eine zweite Aufgabe, die waehrend der offenen Frage
+    fortschreitet - ein `exec` haette sie angehalten.
+    """
+    ticks: list[int] = []
+
+    async def ticking() -> None:
+        for index in range(3):
+            ticks.append(index)
+            await asyncio.sleep(0)
+
+    def open_(self) -> None:
+        # Antwortet erst, nachdem der Loop anderen Aufgaben Zeit gegeben hat.
+        asyncio.get_running_loop().call_soon(
+            lambda: self.done(int(QMessageBox.StandardButton.Yes))
+        )
+
+    monkeypatch.setattr(QMessageBox, "open", open_)
+    job = DownloadJob(url="https://provider.test/x", quality="best", output_dir=tmp_path)
+
+    background = asyncio.ensure_future(ticking())
+    assert await window.confirm_large_download(job, 3 * 1024**3) is True
+    await background
+
+    assert ticks == [0, 1, 2], "die Frage hat den Loop angehalten"
 
 
 # --- when it is asked ------------------------------------------------------
@@ -153,7 +188,12 @@ def session_for(media: Media) -> ProviderSession:
 async def test_a_small_download_is_never_asked_about(tmp_path):
     asked: list[int] = []
     job = DownloadJob(url="https://provider.test/x", quality="best", output_dir=tmp_path)
-    job.confirm_large_download = lambda _job, size: (asked.append(size), True)[1]
+
+    async def confirm(_job, size: int) -> bool:
+        asked.append(size)
+        return True
+
+    job.confirm_large_download = confirm
 
     await run_download_job(
         job, session_factory=lambda: session_for(media_of(LARGE_DOWNLOAD_BYTES - 1))
@@ -167,14 +207,18 @@ async def test_a_small_download_is_never_asked_about(tmp_path):
 async def test_the_question_comes_before_the_first_byte(tmp_path):
     """Refusing after the download would save nothing, so it is asked first."""
     job = DownloadJob(url="https://provider.test/x", quality="best", output_dir=tmp_path)
-    job.confirm_large_download = lambda _job, size: False
+
+    async def refuse(_job, size: int) -> bool:
+        return False
+
+    job.confirm_large_download = refuse
 
     await run_download_job(
         job, session_factory=lambda: session_for(media_of(3 * 1024**3))
     )
 
     assert job.state == LifecycleState.FAILED
-    assert "GiB" in job.error
+    assert "GiB" in str(job.error)
     assert list(tmp_path.glob("*.mp4")) == [], "nothing may have been written"
 
 
@@ -184,7 +228,12 @@ async def test_a_provider_that_states_no_size_cannot_be_asked_about(tmp_path):
     alternative would be a dialog on every job from such a provider."""
     asked: list[int] = []
     job = DownloadJob(url="https://provider.test/x", quality="best", output_dir=tmp_path)
-    job.confirm_large_download = lambda _job, size: (asked.append(size), True)[1]
+
+    async def confirm(_job, size: int) -> bool:
+        asked.append(size)
+        return True
+
+    job.confirm_large_download = confirm
 
     await run_download_job(job, session_factory=lambda: session_for(media_of(None)))
 

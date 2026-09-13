@@ -127,7 +127,7 @@ async def test_async_method_boundaries(tmp_path):
     
     # delete_download is async
     assert asyncio.iscoroutinefunction(manager.delete_download)
-    await manager.delete_download(job)
+    await manager.delete_download(job, delete_file=True)
 
 # 7. Fake Complete Download Integration
 
@@ -212,7 +212,7 @@ async def test_fake_failed_metadata():
         job = manager.add_download("http://fail")
         await job.asyncio_task
         assert job.state == LifecycleState.FAILED
-        assert "ConnectionError" in job.error
+        assert "ConnectionError" in str(job.error)
 
 @pytest.mark.asyncio
 async def test_fake_cancel_download():

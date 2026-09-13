@@ -114,7 +114,7 @@ async def test_a_cancelled_login_leaves_the_refusal_as_it_was(tmp_path):
     await run_download_job(job, session_factory=lambda: session)
 
     assert job.state == LifecycleState.FAILED
-    assert "_Refusal:" in (job.error or "")
+    assert "_Refusal:" in str(job.error or "")
     assert registry.resolved == [POST_URL]
     assert core.configurations == []
 
