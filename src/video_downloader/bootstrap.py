@@ -8,7 +8,7 @@ import threading
 import time
 from functools import partial
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from base_api import BaseCore, DirectMediaAdapter, ProviderRegistry
 from base_api.modules.config import RuntimeConfig
@@ -21,8 +21,10 @@ from video_downloader.application.download_service import run_download_job
 from video_downloader.application.provider_session import ProviderSession
 from video_downloader.domain.download_job import DownloadJob
 from video_downloader.infrastructure.paths import AppPaths
+from video_downloader.infrastructure.session_store import SessionStore
 from video_downloader.infrastructure.settings import AppSettings
 from video_downloader.providers import PeerTubeAdapter, XAdapter, YouTubeAdapter
+from video_downloader.providers.x import XLoginRequiredError
 from video_downloader.ui.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -82,7 +84,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def create_provider_session() -> ProviderSession:
+def create_provider_session(session_store: Any = None) -> ProviderSession:
     """Build the production registry, scoped to one job.
 
     This is the only place that knows which websites the application supports.
@@ -114,13 +116,35 @@ def create_provider_session() -> ProviderSession:
     and it carries no meaning beyond reading order: selection is by `supports()`
     alone, and two adapters claiming one URL stays an `AmbiguousProviderError`
     rather than being silently settled by position.
+
+    `session_store` is where a site login lives, and it is passed in rather than
+    built here for two reasons. The window that establishes a session and the
+    resolver that uses it have to share one instance, or a job retrying after a
+    login would read a cache written before it. And a default store would make
+    every caller that builds a registry - the test suite included - read the
+    developer's real per-user file. Without one, resolution is anonymous, which
+    is what it was before there was a login at all.
     """
     core = BaseCore(RuntimeConfig())
     registry = ProviderRegistry()
     registry.register(XHamsterAdapter())
     registry.register(PeerTubeAdapter())
     registry.register(YouTubeAdapter())
-    registry.register(XAdapter())
+    # The narrowest contract that works: the adapter is handed a way to ask for
+    # its own site's session, not the store. It cannot read another site's, and
+    # it asks per resolution, so a login is in effect the moment it finishes.
+    registry.register(XAdapter(
+        session_source=(
+            partial(session_store.load, XLoginRequiredError.site)
+            if session_store is not None else None
+        ),
+        # And the right to drop it, for the one case where keeping it is worse
+        # than having none: a session X rejects makes even a public post fail.
+        forget_session=(
+            partial(session_store.clear, XLoginRequiredError.site)
+            if session_store is not None else None
+        ),
+    ))
     registry.register(DirectMediaAdapter())
     return ProviderSession(registry=registry, core=core)
 
@@ -256,12 +280,16 @@ def run_application(*, debug: bool = False, smoke_test: bool = False) -> int:
     # The directory comes from the user's persisted choice, and may legitimately
     # be absent on first run - the window asks for one when a download starts.
     settings = AppSettings()
+    # One store for the whole application: the window writes what a login
+    # produced, every job's registry reads it back, and a job retrying right
+    # after a login sees it because they share the instance that cached it.
+    sessions = SessionStore()
     manager = DownloadManager(
         output_dir=settings.get_download_directory(),
         max_concurrent_downloads=3,
-        job_runner=create_job_runner(),
+        job_runner=create_job_runner(partial(create_provider_session, sessions)),
     )
-    window = MainWindow(manager, settings)
+    window = MainWindow(manager, settings, sessions)
 
     if smoke_test:
         verify_extractors()

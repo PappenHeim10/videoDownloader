@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
 from video_downloader.application.download_service import run_download_job
@@ -33,7 +33,7 @@ class DownloadManager:
         self._jobs: dict[str, DownloadJob] = {}
         self._shutdown = False
         if self.output_dir is not None:
-            self._load_existing_files()
+            self.rescan_output_directory()
 
     @staticmethod
     def _prepare(output_dir: str | Path) -> Path:
@@ -42,15 +42,50 @@ class DownloadManager:
         (resolved / ".state").mkdir(exist_ok=True)
         return resolved
 
-    def _load_existing_files(self) -> None:
-        assert self.output_dir is not None
+    def rescan_output_directory(self, output_dir: str | Path | None = None) -> None:
+        """Lies die fertigen Dateien im Zielordner neu ein.
+
+        Frueher lief das genau einmal, im Konstruktor. Wer danach den Zielordner
+        wechselte, sah weiter die Dateien des alten - die Liste beschrieb ein
+        Verzeichnis, in das nichts mehr geschrieben wurde.
+
+        Eintraege aus einem frueheren Scan werden verworfen, bevor neu gelesen
+        wird: sie beschreiben ein anderes Verzeichnis. Jobs dieser Sitzung
+        bleiben unangetastet, auch wenn ihre Datei woanders liegt - sie gehoeren
+        dem Benutzer und nicht dem Scan.
+
+        Der Aufrufer liest danach `get_jobs()` erneut; diese Methode meldet
+        nichts zurueck, weil sowohl Zugaenge als auch Abgaenge entstehen und
+        eine Liste beides schon ausdrueckt.
+        """
+        if output_dir is not None:
+            self.output_dir = self._prepare(output_dir)
+        if self.output_dir is None:
+            return
+
+        for job_id in [job.id for job in self._jobs.values() if job.from_disk]:
+            self._jobs.pop(job_id, None)
+
+        # Eine Datei, die bereits zu einem Job dieser Sitzung gehoert, taucht
+        # nicht ein zweites Mal als Fund auf.
+        claimed = {
+            job.output_file for job in self._jobs.values() if job.output_file is not None
+        }
         for path in sorted(self.output_dir.iterdir()):
-            if path.is_file() and path.suffix.lower() in FINISHED_SUFFIXES:
-                job = DownloadJob(url="", quality="best", output_dir=self.output_dir, title=path.name)
-                job.output_file = path
-                job.progress = 100.0
-                job.transition(LifecycleState.COMPLETED)
-                self._jobs[job.id] = job
+            if not path.is_file() or path.suffix.lower() not in FINISHED_SUFFIXES:
+                continue
+            if path in claimed:
+                continue
+            job = DownloadJob(
+                url="",
+                quality="best",
+                output_dir=self.output_dir,
+                title=path.name,
+                from_disk=True,
+            )
+            job.output_file = path
+            job.mark_completed()
+            self._jobs[job.id] = job
 
     def add_download(
         self,
@@ -58,7 +93,8 @@ class DownloadManager:
         quality: str | int = "best",
         remux: bool = True,
         output_dir: str | Path | None = None,
-        confirm_large_download: Callable[[DownloadJob, int], bool] | None = None,
+        confirm_large_download: Callable[[DownloadJob, int], Awaitable[bool]] | None = None,
+        request_login: Callable[[Exception], Awaitable[bool]] | None = None,
     ) -> DownloadJob:
         if self._shutdown:
             raise RuntimeError("DownloadManager ist bereits beendet")
@@ -82,7 +118,11 @@ class DownloadManager:
             output_dir=target,
             remux=remux,
             confirm_large_download=confirm_large_download,
+            request_login=request_login,
         )
+        # Von hier an erreichen Fortschrittsmeldungen diesen Job auch aus
+        # Worker-Threads; ab jetzt weiss er, worauf er sie anwendet.
+        job.bind_loop()
         self._jobs[job.id] = job
         logger.info("[JOB %s] Download added url=%s quality=%s remux=%s", job.id, job.url, job.quality, job.remux)
         job.transition(LifecycleState.QUEUED)
@@ -90,6 +130,7 @@ class DownloadManager:
         return job
 
     def start_download(self, job: DownloadJob) -> asyncio.Task:
+        job.bind_loop()
         if job.asyncio_task is not None and not job.asyncio_task.done():
             return job.asyncio_task  # type: ignore[return-value]
 
@@ -105,6 +146,13 @@ class DownloadManager:
         return job.asyncio_task  # type: ignore[return-value]
 
     async def cancel_download(self, job: DownloadJob) -> None:
+        """Stoppe den laufenden Job und lass alles liegen, was schon da ist.
+
+        Ausdruecklich ohne Loeschen: der Resume-State und eine halb geladene
+        Spur sind genau das, was einen spaeteren Fortsetzungsversuch billig
+        macht, und eine fertige Ausgabedatei gehoert dem Benutzer. Wer loeschen
+        will, sagt das ueber `delete_download(..., delete_file=True)`.
+        """
         logger.info("[JOB %s] Cancel requested", job.id)
         if job.state in {LifecycleState.COMPLETED, LifecycleState.FAILED, LifecycleState.CANCELLED}:
             return
@@ -112,11 +160,23 @@ class DownloadManager:
         if job.asyncio_task is not None:
             await job.asyncio_task
 
-    async def delete_download(self, job: DownloadJob) -> None:
+    async def delete_download(self, job: DownloadJob, *, delete_file: bool) -> None:
+        """Entferne den Job aus der Verwaltung - und die Datei nur auf Ansage.
+
+        `delete_file` hat absichtlich keinen Vorgabewert. Fuer einen Eintrag aus
+        dem Verzeichnisscan bedeutet das Loeschen eine echte Videodatei, die
+        niemand in dieser Sitzung heruntergeladen hat; das darf kein Aufrufer
+        versehentlich erben, sondern muss an jeder Aufrufstelle dastehen.
+
+        Abbrechen ist etwas anderes und steht in `cancel_download`: es stoppt
+        den Lauf und laesst alles liegen, was auf der Platte ist.
+        """
         if job.asyncio_task is not None and not job.asyncio_task.done():
             await self.cancel_download(job)
-        if job.output_file is not None:
+        if delete_file and job.output_file is not None:
             job.output_file.unlink(missing_ok=True)
+        # Immer: der Job ist gleich weg, und sein Resume-State ist auf seine ID
+        # ausgestellt. Ihn liegen zu lassen, hiesse ihn fuer immer liegen zu lassen.
         job.state_file.unlink(missing_ok=True)
         self._jobs.pop(job.id, None)
 

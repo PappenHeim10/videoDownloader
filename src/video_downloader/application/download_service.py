@@ -18,6 +18,10 @@ from base_api.modules.errors import (
 )
 from base_api.modules.static_functions import strip_title
 
+from video_downloader.application.provider_refusal import (
+    ProviderLoginRequired,
+    ProviderRefusal,
+)
 from video_downloader.application.provider_session import (
     ProviderNotConfiguredError,
     ProviderSession,
@@ -38,7 +42,9 @@ from video_downloader.application.track_selection import (  # noqa: F401
     select_progressive_source,
     select_tracks,
 )
+from video_downloader.application.job_failure import classify
 from video_downloader.domain.download_job import DownloadJob, LifecycleState, ProgressUnit
+from video_downloader.domain.job_error import ErrorKind
 
 logger = logging.getLogger(__name__)
 
@@ -237,13 +243,19 @@ def _extension_for(selection: TrackSelection) -> str:
     return container_for(selection).extension
 
 
-def _confirm_size(job: DownloadJob) -> None:
+async def _confirm_size(job: DownloadJob) -> None:
     """Ask before a large download, when there is anybody to ask.
 
     A 2160p60 track measured 1.4 GB, so "one click and a gigabyte" is a real
     sequence rather than a hypothetical one. With no confirmer attached - a CLI,
     a test - the download proceeds and the size is logged, because refusing on
     a caller's behalf would be worse than telling them afterwards.
+
+    Die Antwort wird erwartet, nicht aufgerufen. Eine Oberflaeche beantwortet
+    diese Frage mit einem Fenster, und solange sie das tut, muessen die anderen
+    Downloads weiterlaufen - was nur geht, wenn der Loop hier nicht steht.
+    `CancelledError` ist dabei keine Antwort, sondern ein Abbruch, und faellt
+    deshalb ungefangen durch.
     """
     estimate = job.expected_bytes
     if estimate is None or estimate < LARGE_DOWNLOAD_BYTES:
@@ -252,7 +264,7 @@ def _confirm_size(job: DownloadJob) -> None:
     if job.confirm_large_download is None:
         logger.warning("[JOB %s] Large download: about %.1f GiB.", job.id, gib)
         return
-    if not job.confirm_large_download(job, estimate):
+    if not await job.confirm_large_download(job, estimate):
         raise DownloadTooLargeError(
             f"Der Download ist ca. {gib:.1f} GiB gross und wurde abgebrochen."
         )
@@ -313,10 +325,13 @@ def _handle_download_result(job: DownloadJob, result: Any) -> None:
     if job.stop_event.is_set() or result_status == "cancelled":
         job.transition(LifecycleState.CANCELLED)
     elif result is False or (result_status is not None and result_status != "completed"):
-        job.error = "Download blieb unvollständig."
-        job.transition(LifecycleState.FAILED)
+        # Keine Ausnahme, also auch kein Klassenname davor - der Satz ist
+        # derselbe wie bisher. Wiederholbar, weil ein abgebrochener Transfer
+        # genau das ist, wofuer der Resume-State geschrieben wurde.
+        job.failed_with(
+            ErrorKind.INCOMPLETE, "Download blieb unvollständig.", retryable=True
+        )
     else:
-        job.progress = 100.0 if job.total_segments else job.progress
         # The downloader's success contract carries no path: BaseCore.download is
         # annotated DownloadReport | bool, returns True unless return_report is
         # requested, and DownloadReport has no path-like field at all. Assigning the
@@ -328,8 +343,43 @@ def _handle_download_result(job: DownloadJob, result: Any) -> None:
         resolved = _result_path(result)
         if resolved is not None:
             job.output_file = resolved
-        job.transition(LifecycleState.COMPLETED)
+        # Setzt den Fortschritt auf 100 % und traegt den Gesamtwert nach, wenn
+        # ihn nie jemand genannt hat - sonst endet ein fertiger Download auf 0 %.
+        job.mark_completed()
         job.state_file.unlink(missing_ok=True)
+
+
+async def _resolve(job: DownloadJob, session: ProviderSession) -> Any:
+    """The job's URL into `Media`, with one more attempt if a login was missing.
+
+    A provider that refuses only for want of a session says so with
+    `ProviderLoginRequired`, which carries the site and its login page and
+    nothing about which provider raised it. If somebody is there to ask, they
+    are asked; if they sign in, the resolution runs once more and the adapter
+    reads the session that now exists.
+
+    Exactly once. The second attempt is not guarded, so a refusal that survives
+    a login reaches the caller as the refusal it is - and an adapter that has a
+    session raises the plain unavailable refusal anyway, because asking a user
+    to sign in again would be asking them to repeat what did not work.
+    """
+    logger.info("[JOB %s] resolve start URL: %s", job.id, job.url)
+    try:
+        return await session.registry.resolve(job.url)
+    except ProviderLoginRequired as refusal:
+        if job.request_login is None:
+            raise
+        logger.info(
+            "[JOB %s] %s refused for want of a login; asking: %s",
+            job.id, getattr(refusal, "site", "?"), refusal,
+        )
+        if not await job.request_login(refusal):
+            # Cancelled, or the window closed without a session. The refusal is
+            # the truth about the URL, so it stands rather than becoming a
+            # different failure.
+            raise
+        logger.info("[JOB %s] signed in; resolving once more", job.id)
+        return await session.registry.resolve(job.url)
 
 
 async def run_download_job(
@@ -359,8 +409,7 @@ async def run_download_job(
         session = session_factory()
 
         job.transition(LifecycleState.FETCHING_METADATA)
-        logger.info("[JOB %s] resolve start URL: %s", job.id, job.url)
-        media = await session.registry.resolve(job.url)
+        media = await _resolve(job, session)
         logger.info("[JOB %s] resolve finished, provider=%s", job.id, getattr(media, "provider", "unknown"))
 
         job.title = getattr(media, "title", None) or job.url
@@ -377,7 +426,7 @@ async def run_download_job(
             strip_title(job.title) + _extension_for(selection)
         )
         job.expected_bytes = estimate_bytes(selection)
-        _confirm_size(job)
+        await _confirm_size(job)
         _ensure_async_stop_event(job)
         callback = _create_progress_callback(job)
 
@@ -442,12 +491,22 @@ async def run_download_job(
         # No provider ran, so nothing was fetched and nothing was written. Logged
         # apart from the generic failure below so that "this link is not ours"
         # never reads like a network or extraction problem.
-        job.error = f"{type(error).__name__}: {error}"
-        job.transition(LifecycleState.FAILED)
+        job.fail(classify(error))
         logger.warning("[JOB %s] Provider selection failed for %s: %s", job.id, job.url, error)
+    except ProviderRefusal as error:
+        # A provider answered, and the answer was no - already classified by the
+        # adapter, already carrying the sentence the user reads. Nothing failed,
+        # so nothing is logged as though something had: the measured cost of the
+        # branch below was three chained exceptions over fourteen frames for a
+        # post that simply carried no video. The job still fails; a refusal is
+        # not a download.
+        job.fail(classify(error))
+        logger.warning(
+            "[JOB %s] The provider refused %s: %s (%s)",
+            job.id, job.url, error, type(error).__name__,
+        )
     except Exception as error:
-        job.error = f"{type(error).__name__}: {error}"
-        job.transition(LifecycleState.FAILED)
+        job.fail(classify(error))
         logger.exception("[JOB %s] Download failed", job.id)
     finally:
         if session is not None:

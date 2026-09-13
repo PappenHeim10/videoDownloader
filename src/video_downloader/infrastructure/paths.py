@@ -64,6 +64,16 @@ class AppPaths:
         return self.root / "settings.json"
 
     @property
+    def session_file(self) -> Path:
+        """Where site logins are kept - encrypted, and never in `settings.json`.
+
+        Its own file because its content is a credential: `settings.json` is
+        written in plain UTF-8 for the user to read and edit, and an account's
+        session token has no business being readable there.
+        """
+        return self.root / "sessions.dat"
+
+    @property
     def log_dir(self) -> Path:
         return self.root / "logs"
 

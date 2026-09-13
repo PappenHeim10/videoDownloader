@@ -12,6 +12,14 @@ to know which website a job came from:
   stop partway with no warning, and asking for the last byte answers exactly
   that, for that track, at the cost of one request.
 
+  The same request also states the length, and for a provider that publishes
+  none that is the only honest number there is: X states no size at all, and a
+  tail read of one of its files answered `bytes 33007912-33007912/33007913` on
+  2026-09-07 - the exact length the download then transferred. So the probe
+  reports the total rather than a yes, which is what lets a track nobody sized
+  reach our own transport at all - with resume, retries and atomic
+  finalisation - instead of falling back to the resolver for want of a number.
+
 Progress is aggregated across every phase - each track, then the mux - so the
 bar moves once from zero to done rather than restarting per file.
 """
@@ -20,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -41,6 +50,14 @@ logger = logging.getLogger(__name__)
 #: it. Named after what it is - a transport - because that is the question
 #: `source_type` answers; a provider name here would be a layering violation.
 YTDLP_TRANSPORT = "YTDLP"
+
+#: What a 206 states about the part it served: `bytes 0-0/10240`. A tail read
+#: is asked without naming the byte - `Range: bytes=-1` - so this header is
+#: where the length comes from, and its numbers are checked rather than trusted:
+#: the byte served has to be the last one of the resource. A server answering
+#: `bytes */*`, or answering a suffix range with its first byte, has not said
+#: what was asked.
+_CONTENT_RANGE = re.compile(r"\Abytes\s+(\d+)-(\d+)/(\d+)\Z")
 
 #: Above this, a download is worth asking about. A 2160p60 VP9 track measured
 #: 1 362 269 481 bytes, so "one click, 1.4 GB, no warning" is a real sequence.
@@ -71,6 +88,11 @@ class _Phase:
     name: str
     weight: int
     done: int = 0
+    #: Diese Phase hat keine eigene Groesse - sie wiegt, was die anderen wiegen.
+    #: Das Muxen ist die einzige: es liest beide Spuren, also kostet es
+    #: ungefaehr, was beide zusammen wiegen, und das steht erst fest, wenn beide
+    #: gewogen sind.
+    derived: bool = False
 
 
 class _AggregateProgress:
@@ -90,7 +112,6 @@ class _AggregateProgress:
     def __init__(self, phases: list[_Phase], report: Callable[[int, int], None]) -> None:
         self._phases = phases
         self._report = report
-        self._total = sum(phase.weight for phase in phases) or 0
 
     def callback_for(self, name: str) -> Callable[[int, int], None]:
         phase = next(phase for phase in self._phases if phase.name == name)
@@ -99,7 +120,6 @@ class _AggregateProgress:
             if not phase.weight and total > 0:
                 # Nobody could estimate this one; the download just measured it.
                 phase.weight = total
-                self._total = sum(other.weight for other in self._phases)
             # A phase may learn its real size mid-flight; an estimated weight
             # stays what it was, so one phase cannot push the bar past 100%.
             phase.done = min(done, phase.weight) if phase.weight else done
@@ -110,12 +130,39 @@ class _AggregateProgress:
     def complete(self, name: str) -> None:
         for phase in self._phases:
             if phase.name == name:
+                if not phase.weight:
+                    # Niemand hat sie vorher gewogen; was ankam, ist jetzt die
+                    # einzige belegte Zahl und damit ihr Gewicht.
+                    phase.weight = phase.done
                 phase.done = phase.weight
         self._emit()
 
+    def _denominator(self) -> int:
+        """Der Gesamtwert - oder 0, solange eine Phase ungewogen ist.
+
+        Frueher war der Nenner die Summe der bereits bekannten Gewichte. Das
+        las sich harmlos und lief messbar rueckwaerts: bei zwei ungewogenen
+        Spuren stand der Balken auf 100 %, sobald die erste fertig war, und fiel
+        auf 87,5 %, sobald die zweite ihre Groesse lernte.
+
+        Eine Null ist hier keine fehlende Angabe, sondern eine Aussage: sie
+        heisst "Ende unbekannt", genau wie `DownloadJob.has_known_total` sie
+        liest, und die Oberflaeche zeichnet dafuer einen unbestimmten Balken
+        statt eines Prozentsatzes, der sich noch verschiebt.
+        """
+        measured = [phase for phase in self._phases if not phase.derived]
+        if not measured or any(phase.weight <= 0 for phase in measured):
+            return 0
+        base = sum(phase.weight for phase in measured)
+        for phase in self._phases:
+            if phase.derived:
+                phase.weight = base
+        return base + sum(phase.weight for phase in self._phases if phase.derived)
+
     def _emit(self) -> None:
+        total = self._denominator()
         done = sum(phase.done for phase in self._phases)
-        self._report(min(done, self._total) if self._total else done, self._total)
+        self._report(min(done, total) if total else done, total)
 
 
 def is_ytdlp(source: MediaSource) -> bool:
@@ -143,8 +190,25 @@ def container_for(selection: TrackSelection) -> ContainerChoice:
     )
 
 
-async def can_engine_read_whole(source: MediaSource, timeout: float = 15.0) -> bool:
-    """Whether our own transport can read this source to the last byte.
+def _total_from(header: Any) -> int | None:
+    """The resource's length, read out of the `Content-Range` of a tail read.
+
+    Verified rather than parsed: the byte served has to be the last one of the
+    resource, which is what a suffix range asked for. That check is what makes
+    the number safe to hand a downloader as the size to expect - a server that
+    answered about some other byte has not answered this question.
+    """
+    match = _CONTENT_RANGE.match(str(header or "").strip())
+    if not match:
+        return None
+    first, last, total = (int(group) for group in match.groups())
+    if first != last or last != total - 1:
+        return None
+    return total
+
+
+async def readable_total(source: MediaSource, timeout: float = 15.0) -> int | None:
+    """This source's full length, iff our own transport can read every byte.
 
     One request for one byte, at the far end of the file. It answers the only
     question that matters here and that nothing else can answer offline: some
@@ -152,36 +216,54 @@ async def can_engine_read_whole(source: MediaSource, timeout: float = 15.0) -> b
     as a 403 somewhere in the middle after transferring everything before it.
     Asking for the last byte finds that out for a fraction of a kilobyte.
 
-    A source whose size nobody stated cannot be probed - there is no last byte
-    to ask for - and any failure at all answers "no". This must never be the
-    reason a job fails: the fallback path is one that already works.
+    Which byte that is depends on whether anybody stated how long the file is:
+
+    * A stated size is asked about by number, exactly as it always has been, so
+      a server that disagrees about the total refuses the range rather than
+      quietly serving some other byte.
+    * A size nobody stated is asked for as a suffix - `Range: bytes=-1`, "the
+      last byte, whichever it is" - and the answer states the length. That is
+      the only number X ever gives for its own files, and it is the true one:
+      measured at 33 007 913 bytes against a `filesize_approx` of 86 514 480,
+      and the download transferred 33 007 913.
+
+    Returns `None` for "not through our transport", and every failure answers
+    that: a probe must never be the reason a job fails, because the path it
+    falls back to already works.
     """
-    total = source.expected_size
-    if not total or total <= 0:
-        return False
+    stated = source.expected_size if (source.expected_size or 0) > 0 else None
 
     from curl_cffi.requests import AsyncSession
 
     headers = dict(source.headers)
     headers["Accept-Encoding"] = "identity"
-    headers["Range"] = f"bytes={total - 1}-{total - 1}"
+    headers["Range"] = f"bytes={stated - 1}-{stated - 1}" if stated else "bytes=-1"
     try:
         async with AsyncSession() as session:
             response = await session.get(source.url, headers=headers, timeout=timeout)
-            return int(response.status_code) == 206
+            if int(response.status_code) != 206:
+                return None
+            # A stated size needs nothing read back: the 206 says that byte was
+            # served, and by construction that byte was the last one.
+            return stated or _total_from(response.headers.get("Content-Range"))
     except Exception as error:  # noqa: BLE001 - a probe may never fail a job
         logger.debug("Readability probe failed; keeping the resolver path: %s", error)
-        return False
+        return None
 
 
-def as_engine_source(source: MediaSource) -> MediaSource:
+def as_engine_source(source: MediaSource, total: int) -> MediaSource:
     """The same track, marked as one the engine's transport fetches.
+
+    `total` is what the probe measured, and it is carried rather than recomputed:
+    for a provider that stated a size it is that size, and for one that stated
+    none it is the only length anybody has. The engine needs it to resume, to
+    know when it is finished, and to report a bar that starts at a real number.
 
     A copy rather than a mutation: the selection is shared with the caller and
     with the job's own record of what it chose, and rewriting a field on it
     would change what that record says after the fact.
     """
-    return replace(source, source_type="HTTP")
+    return replace(source, source_type="HTTP", expected_size=total)
 
 
 async def _download_via_engine(
@@ -310,8 +392,10 @@ async def download_selection(
         for index, source in enumerate(sources)
     ]
     if selection.needs_muxing:
-        # The mux reads both tracks, so it is worth roughly what they weigh.
-        phases.append(_Phase(name="mux", weight=sum(p.weight for p in phases)))
+        # The mux reads both tracks, so it is worth roughly what they weigh -
+        # was erst feststeht, wenn beide gewogen sind. Deshalb abgeleitet statt
+        # hier einmal ausgerechnet.
+        phases.append(_Phase(name="mux", weight=0, derived=True))
     progress = _AggregateProgress(phases, report)
 
     paths: dict[str, Path] = {}
@@ -320,11 +404,17 @@ async def download_selection(
         extension = (source.track.container or "bin").strip().lower()
         track_path = work_dir / f"{role}.{extension}"
         fetch_source = source
-        if is_ytdlp(source) and await can_engine_read_whole(source):
-            # Our own transport owns resume, retries and atomic finalisation, so
-            # it is the better place to be whenever it can finish the job.
-            fetch_source = as_engine_source(source)
-            logger.info("Fetching the %s track through the engine transport.", role)
+        if is_ytdlp(source):
+            total = await readable_total(source)
+            if total is not None:
+                # Our own transport owns resume, retries and atomic
+                # finalisation, so it is the better place to be whenever it can
+                # finish the job.
+                fetch_source = as_engine_source(source, total)
+                logger.info(
+                    "Fetching the %s track through the engine transport (%d bytes).",
+                    role, total,
+                )
         try:
             if is_ytdlp(fetch_source):
                 await _download_via_resolver(

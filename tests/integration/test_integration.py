@@ -99,8 +99,11 @@ def test_gui_to_manager_wiring(qt_app, tmp_path, monkeypatch):
         "720",
         output_dir=target.resolve(),
         # The window is the only layer that can ask a question, so it is the
-        # only one that can supply the answer to "this is 4 GiB, continue?".
+        # only one that can supply the answer to "this is 4 GiB, continue?" -
+        # and, for the same reason, the only one that can show a login page when
+        # a site refuses a URL to anyone who is not signed in.
         confirm_large_download=window.confirm_large_download,
+        request_login=window.sign_in_to_site,
     )
 
 # 6. Async Call Boundaries
@@ -124,7 +127,7 @@ async def test_async_method_boundaries(tmp_path):
     
     # delete_download is async
     assert asyncio.iscoroutinefunction(manager.delete_download)
-    await manager.delete_download(job)
+    await manager.delete_download(job, delete_file=True)
 
 # 7. Fake Complete Download Integration
 
@@ -209,7 +212,7 @@ async def test_fake_failed_metadata():
         job = manager.add_download("http://fail")
         await job.asyncio_task
         assert job.state == LifecycleState.FAILED
-        assert "ConnectionError" in job.error
+        assert "ConnectionError" in str(job.error)
 
 @pytest.mark.asyncio
 async def test_fake_cancel_download():

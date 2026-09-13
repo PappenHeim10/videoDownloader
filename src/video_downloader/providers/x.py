@@ -25,16 +25,41 @@ it with a plausible value:
   derives from the bitrate is not a substitute: measured against the real
   `Content-Range` totals on 2026-09-07 it overstated all four formats of one
   post, by 2.52x, 2.69x, 2.81x and 5.70x. So `expected_size` stays unset, which
-  costs a progress total the download then learns for itself, and avoids a
-  large-download question asked about a number that is wrong by a factor of six.
+  avoids a large-download question asked about a number that is wrong by a
+  factor of six. The real total is not lost with it: the download layer reads
+  it off the one request for the last byte it makes anyway, to find out whether
+  it can fetch the file itself - see `readable_total`.
 
 Resolution goes through the same yt-dlp the YouTube adapter uses, on the same
 terms - no cookies, no verbose, a redacting logger - because every reason for
-those is about the resolver rather than about the site.
+those is about the resolver rather than about the site. It runs in a worker
+thread: the resolution of one post was measured at 2.4 s, and `resolve` is
+awaited on the thread that draws the window.
+
+The one thing X does not state is why it will not hand a post over. A post the
+site shows only to a signed-in viewer comes back as a tombstone with no reason
+attached, and the resolver reports that as "no video could be found in this
+tweet" - the same words it uses for a post of plain text. Those two are told
+apart here rather than repeated; see `_refuse_withheld`.
+
+A session, when the user has established one, is used for exactly one step: the
+resolution. It is installed into the resolver's cookie jar for that call and
+exists nowhere else - no cookie file, nothing on the media requests that follow.
+That last part is deliberate rather than an omission: the progressive files X
+publishes are ordinary CDN objects on `video.twimg.com`, and one was fetched to
+the last byte with no cookie at all on 2026-09-07. Sending an account's session
+to a CDN that does not ask for it would widen where that credential travels for
+no gain.
+
+Whether a session was in play also decides which refusal a withheld post gets.
+Without one, a login is worth offering; with one, X has answered the signed-in
+account and asking the user to sign in again would be asking them to repeat
+what did not work.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Optional
@@ -43,8 +68,13 @@ from urllib.parse import urlsplit
 from base_api.models import Media, MediaSource, MediaTrackInfo
 from base_api.modules.errors import UnsupportedURLError
 
+from video_downloader.application.provider_refusal import (
+    ProviderLoginRequired,
+    ProviderRefusal,
+)
 from video_downloader.application.track_download import YTDLP_TRANSPORT
-from video_downloader.providers.ytdlp_options import base_options
+from video_downloader.domain.site_session import SiteSession
+from video_downloader.providers.ytdlp_options import base_options, install_session
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +113,17 @@ _LIVE_SEGMENTS = ("spaces", "broadcasts")
 #: turns out to be one - so the two cannot drift apart.
 _LIVE_REFUSAL = "Live-Uebertragungen und Spaces werden nicht unterstuetzt."
 
+#: What X answers when the session it was given is not one it accepts - expired,
+#: revoked, or from an account that has been logged out elsewhere. Measured on
+#: 2026-09-07 by resolving with a deliberately invalid `auth_token`:
+#:
+#:     Error(s) while querying API: Could not authenticate you
+#:
+#: It matters because X does not fall back on its own: with a session it rejects,
+#: even a public post fails, where the same request without one would have been
+#: answered. So this string is the signal to stop using the stored session.
+_REJECTED_SESSION = ("could not authenticate you", "unauthorized", "401")
+
 #: Protocols this application can hand to a downloader as one file. The `hls-*`
 #: entries arrive as `m3u8_native` and are excluded by this.
 _FETCHABLE_PROTOCOLS = frozenset({"https", "http"})
@@ -94,12 +135,49 @@ _FETCHABLE_PROTOCOLS = frozenset({"https", "http"})
 #: disk as "abc.mp4" - a file named after a shortener token nobody can read.
 _SHORTENED_LINK = re.compile(r"https?://t\.co/\S*")
 
+#: Said to a post X refuses to describe at all. Measured on 2026-09-07 against a
+#: post the site itself shows only to a signed-in viewer: the GraphQL answer is
+#: `{"tweetResult": {"result": {"__typename": "TweetTombstone"}}}` and the
+#: syndication endpoint says the same, neither of them stating a reason. So both
+#: sentences name every reason it can be, because X named none of them - and
+#: neither is "this post has no video", which is what the resolver reports for
+#: it and what a user would act on by deleting the link.
+#:
+#: Which one is said depends on whether a session was in play, because that is
+#: what decides whether there is anything left for the user to do.
+_LOGIN_REFUSAL = (
+    "X gibt diesen Beitrag ohne Anmeldung nicht heraus - moeglicherweise "
+    "altersbeschraenkt, geschuetzt oder geloescht. Eine Anmeldung kann ihn "
+    "freischalten."
+)
+
+_WITHHELD_REFUSAL = (
+    "X gibt diesen Beitrag auch dem angemeldeten Konto nicht heraus - er ist "
+    "geschuetzt, altersbeschraenkt oder geloescht."
+)
+
+#: The fields yt-dlp fills from X's own description of a post. A post X really
+#: described states at least one of them; the tombstone above states none, and
+#: that is the whole difference between "no video in this post" and "X said
+#: nothing about this post". Matched on emptiness rather than on the tombstone
+#: itself, because the tombstone never reaches this layer: the resolver turns
+#: it into an ordinary answer with no formats and no facts.
+_DESCRIBED_FIELDS = (
+    "uploader", "uploader_id", "channel_id", "timestamp", "description", "duration",
+)
+
 
 class XError(Exception):
-    """Base class for the adapter's own failures."""
+    """Base class for the adapter's own failures.
+
+    The ones that are a refusal rather than a failure - X answered, and the
+    answer was no - additionally carry `ProviderRefusal`, which is what lets the
+    download service report them as the sentence they are instead of as a
+    traceback.
+    """
 
 
-class XUnsupportedTargetError(XError):
+class XUnsupportedTargetError(XError, ProviderRefusal):
     """An X URL that names something other than one post.
 
     Its own type because "profiles are not supported" and "this link is not
@@ -116,21 +194,58 @@ class XExtractionError(XError):
     """
 
 
-class XUnavailableError(XError):
+class XUnavailableError(XError, ProviderRefusal):
     """X states this post may not be read without more than we have.
 
     A protected account, an age-restricted post, a suspended account, or a rate
     limit. Deliberately not an extraction error: nothing failed, and a retry
     returns the same answer. This application does not attempt to get past any
     of them.
+
+    Some of them stop being true once the user signs in, and those are raised as
+    `XLoginRequiredError` - the same refusal, plus the fact that there is
+    something to do about it.
     """
 
 
-class XLiveNotSupportedError(XError):
+class XLoginRequiredError(XUnavailableError, ProviderLoginRequired):
+    """X would answer this for a signed-in viewer, and nobody is signed in.
+
+    A subclass of the unavailable case rather than a sibling: it *is* one, and
+    every caller that already treats "X will not hand this over" as a refusal
+    keeps working. What it adds is that something can be done about it, which
+    `ProviderLoginRequired` is the provider-neutral way to say - the three
+    attributes below are what a login window needs, and it needs nothing else.
+
+    `login_url` is X's own login page. This application never builds a login
+    form: a password typed into one would be ours to hold, and X's captcha,
+    two-factor and e-mail challenges only work on their own page anyway.
+
+    The two cookie names are not a guess. `TwitterBaseIE.is_logged_in` is
+    `bool(self._get_cookies(self._API_BASE).get('auth_token'))`, and the
+    extractor sends `x-csrf-token` from `ct0`, so those two are precisely what
+    "signed in" means to the resolver that will use them.
+    """
+
+    site = "x.com"
+    login_url = "https://x.com/login"
+    required_cookies = ("auth_token", "ct0")
+
+
+class XLiveNotSupportedError(XError, ProviderRefusal):
     """A live broadcast or a Space, which this application does not download."""
 
 
-class XNoSupportedSourceError(XExtractionError):
+class _SessionRejected(Exception):
+    """X refused the session itself, rather than the post.
+
+    Never leaves this module: `_extract` answers it by dropping the session and
+    resolving again without one, so no caller ever has to know that the first
+    attempt carried a credential X had already invalidated.
+    """
+
+
+class XNoSupportedSourceError(XExtractionError, ProviderRefusal):
     """The post was read, and carries no video.
 
     The ordinary case by far - a post with only text, a photo or a link
@@ -229,6 +344,19 @@ def _codec(value: Any) -> Optional[str]:
     return value
 
 
+def _rejects_session(message: str) -> bool:
+    """Whether X refused the session itself rather than the post.
+
+    Its own function because the consequence is unusual: this is the one
+    resolver failure this adapter answers by changing what it holds - dropping
+    the session - instead of reporting it. Matched on X's own wording, which is
+    the only contract available, and kept narrow: a message that merely mentions
+    a login is not this, and the fallback is a refusal the user can act on.
+    """
+    lowered = message.lower()
+    return any(phrase in lowered for phrase in _REJECTED_SESSION)
+
+
 def _fetchable(entry: Any) -> bool:
     """Whether this entry is one file this application can hand to a downloader.
 
@@ -247,15 +375,32 @@ def _fetchable(entry: Any) -> bool:
 class XAdapter:
     """Resolves an X post URL into a provider-neutral `Media`.
 
-    Holds no client and no session: `yt_dlp.YoutubeDL` is constructed per call
-    and closed with it, so nothing accumulated during one resolution can reach
-    the next.
+    Holds no client and no session of its own: `yt_dlp.YoutubeDL` is constructed
+    per call and closed with it, so nothing accumulated during one resolution can
+    reach the next. A *site* session, if the user established one, is read fresh
+    per resolution through `session_source` - which is what lets a job that just
+    prompted for a login retry and find it, without this adapter caching a
+    credential for the life of the process.
     """
 
-    def __init__(self, resolver: Any = None) -> None:
+    def __init__(
+        self,
+        resolver: Any = None,
+        session_source: Any = None,
+        forget_session: Any = None,
+    ) -> None:
         # Injectable so the tests can drive stored, redacted fixtures without a
         # network and without patching a module global.
         self._resolver = resolver
+        # A callable returning the stored `SiteSession` for x.com, or `None`.
+        # A callable rather than the session itself: it is asked at resolution
+        # time, so a login that happened one second ago is already in effect.
+        self._session_source = session_source
+        # Called when X rejects the stored session, so the next resolution does
+        # not carry a credential the site has already refused. Separate from the
+        # source because reading and discarding are different rights: this
+        # adapter may drop its own site's session and nothing else.
+        self._forget_session = forget_session
 
     def supports(self, url: str) -> bool:
         """Whether this adapter claims `url`. Cheap, synchronous, network-free.
@@ -272,13 +417,57 @@ class XAdapter:
         except XError:
             return True
 
+    def _session(self) -> SiteSession | None:
+        """The session to resolve with, or `None` for "nobody is signed in".
+
+        Every failure answers `None`, including a store that cannot be read: a
+        resolution that would have worked anonymously must not be lost because a
+        session file was unreadable, and the refusal the user then sees offers
+        the login again.
+
+        A session missing either cookie is not one. Without `auth_token` X
+        answers exactly as it does to a stranger, so treating a half session as
+        signed in would replace an offer to log in with "your account may not
+        see this" - the one sentence that is certainly wrong.
+        """
+        if self._session_source is None:
+            return None
+        try:
+            session = self._session_source()
+        except Exception as error:  # noqa: BLE001 - a store may never fail a resolution
+            logger.warning("Gespeicherte X-Anmeldung ist nicht nutzbar: %s", error)
+            return None
+
+        if session is None:
+            return None
+        if not session.has_all(XLoginRequiredError.required_cookies):
+            logger.info(
+                "Gespeicherte X-Anmeldung ist unvollstaendig (%s) und wird nicht "
+                "verwendet.", ", ".join(session.names()),
+            )
+            return None
+        return session
+
     async def resolve(self, url: str) -> Media:
         """Resolve a post URL into `Media` with every fetchable file."""
         post_id = _canonical_post_id(url)
         if post_id is None:
             raise UnsupportedURLError(f"Not a supported X post URL: {url}")
 
-        info = self._extract(url)
+        # yt-dlp is synchronous and `resolve` is awaited on the GUI's event
+        # loop thread: measured on 2026-09-07 one post cost 2.4 s there - a
+        # guest token, a GraphQL call, and on the first resolution of a process
+        # the import of yt_dlp itself - and the watchdog reported the UI frozen
+        # for every one of those seconds. The fetch has run in a worker thread
+        # for exactly this reason since it was written; resolution is no
+        # different, and it is the half a user waits on first.
+        # The session comes back from the resolution rather than being read
+        # here, because the resolution is what knows which one was used: a
+        # session X rejects is dropped mid-flight and the retry is anonymous, so
+        # reading the store before or after would both describe a different
+        # attempt than the one that produced `info`. Reading it there also keeps
+        # a file read and a decryption off the thread that draws the window.
+        info, session = await asyncio.to_thread(self._extract, url)
         if not isinstance(info, dict):
             # Checked here rather than in `_extract`, so it holds for an
             # injected resolver too: nothing below may assume a shape.
@@ -290,6 +479,10 @@ class XAdapter:
 
         formats = [entry for entry in (info.get("formats") or []) if _fetchable(entry)]
         if not formats:
+            # Asked only here. With a format in hand it makes no difference what
+            # X said about the post; without one it is the whole difference
+            # between the two sentences.
+            self._refuse_withheld(info, logged_in=session is not None)
             raise XNoSupportedSourceError("Dieser Beitrag enthaelt kein Video.")
 
         sources = [
@@ -339,42 +532,120 @@ class XAdapter:
 
         return f"{uploader} - {post_id}" if uploader else post_id
 
-    def _extract(self, url: str) -> dict:
+    def _extract(self, url: str) -> tuple[dict, SiteSession | None]:
+        """The post, and the session it was actually resolved with.
+
+        Both, because the caller decides a sentence by it: a session X will not
+        accept is dropped here and the resolution runs again without one, so
+        what was in effect at the end is not what the store said at the start.
+
+        Dropping it is not optional. With a rejected session X refuses even a
+        public post - measured on 2026-09-07: an invalid `auth_token` turned a
+        post that resolves anonymously into "Could not authenticate you" - so an
+        expired login would break every X download until the user worked out
+        that signing out is the cure. The second attempt carries nothing, which
+        is what makes a third impossible.
+        """
+        session = self._session()
+        try:
+            return self._attempt(url, session), session
+        except _SessionRejected:
+            logger.info(
+                "X hat die gespeicherte Anmeldung abgelehnt; sie wird verworfen "
+                "und der Beitrag ohne sie aufgeloest."
+            )
+            self._discard_session()
+            return self._attempt(url, None), None
+
+    def _attempt(self, url: str, session: SiteSession | None) -> dict:
         """One resolution, with every failure mapped onto this adapter's names."""
+        from yt_dlp.utils import DownloadError, ExtractorError, GeoRestrictedError
+
+        try:
+            return self._read(url, session)
+        except GeoRestrictedError as error:
+            raise XUnavailableError("In dieser Region nicht verfuegbar.") from error
+        except (DownloadError, ExtractorError) as error:
+            if session is not None and _rejects_session(str(error)):
+                raise _SessionRejected(type(error).__name__) from error
+            raise self._classify(
+                str(error), error, logged_in=session is not None
+            ) from error
+        except OSError as error:
+            raise XExtractionError(f"Request to X failed: {error}") from error
+
+    def _discard_session(self) -> None:
+        """Forget the session X refused. Never the reason a resolution fails."""
+        if self._forget_session is None:
+            return
+        try:
+            self._forget_session()
+        except Exception as error:  # noqa: BLE001 - housekeeping, not the job
+            logger.warning("Abgelehnte X-Anmeldung konnte nicht entfernt werden: %s", error)
+
+    def _read(self, url: str, session: SiteSession | None) -> Any:
+        """The resolution itself, with the resolver's own failures untouched."""
         if self._resolver is not None:
             return self._resolver(url)
 
         from yt_dlp import YoutubeDL
-        from yt_dlp.utils import DownloadError, ExtractorError, GeoRestrictedError
 
-        try:
-            with YoutubeDL(base_options(skip_download=True)) as resolver:
-                info = resolver.extract_info(url, download=False)
-        except GeoRestrictedError as error:
-            raise XUnavailableError("In dieser Region nicht verfuegbar.") from error
-        except (DownloadError, ExtractorError) as error:
-            raise self._classify(str(error), error) from error
-        except OSError as error:
-            raise XExtractionError(f"Request to X failed: {error}") from error
-
-        return info
+        with YoutubeDL(
+            base_options(
+                skip_download=True,
+                # A post with no format is an answer to be read, not a failure:
+                # only what X said *besides* the formats tells a text-or-photo
+                # post apart from one X withheld entirely, and the exception
+                # this suppresses carries none of it. Every other failure still
+                # raises, and still goes through `_classify`.
+                ignore_no_formats_error=True,
+            )
+        ) as resolver:
+            if session is not None:
+                # Into this resolver's jar and no further: the jar dies with the
+                # `with` block, and nothing writes it anywhere.
+                install_session(resolver, session)
+            return resolver.extract_info(url, download=False)
 
     @staticmethod
-    def _classify(message: str, error: Exception) -> XError:
+    def _classify(message: str, error: Exception, logged_in: bool = False) -> XError:
         """Turn one resolver message into the failure this application names.
 
         Matched on the text because that is what the resolver gives us: it
         reports X's own wording, and those strings are the contract we actually
         have. Anything unrecognised stays an extraction error rather than being
         guessed into a friendlier one.
+
+        `logged_in` decides nothing about *what* happened and everything about
+        what is left to do. Three of these answers - age restriction, a
+        protected account, a demand to log in - stop being true for a signed-in
+        viewer, so without a session they are raised as the refusal that offers
+        one. A suspended account and a rate limit answer the same to everybody
+        and are never one of those.
+
+        Defaults to `False` because that is the state this application is in
+        until the user changes it.
         """
+        def needs_account(anonymous: str, signed_in: str) -> XError:
+            """One fact, said to someone who can act on it and to someone who cannot."""
+            if logged_in:
+                return XUnavailableError(signed_in)
+            return XLoginRequiredError(anonymous)
+
         lowered = message.lower()
         if "no video could be found" in lowered or "no media" in lowered:
             return XNoSupportedSourceError("Dieser Beitrag enthaelt kein Video.")
         if "nsfw" in lowered or ("age" in lowered and "restrict" in lowered):
-            return XUnavailableError("Altersbeschraenkter Beitrag - nicht unterstuetzt.")
+            return needs_account(
+                "Altersbeschraenkter Beitrag - eine Anmeldung kann ihn freischalten.",
+                "Altersbeschraenkter Beitrag - das angemeldete Konto darf ihn nicht sehen.",
+            )
         if "protected" in lowered or "private" in lowered:
-            return XUnavailableError("Dieses Konto ist geschuetzt.")
+            return needs_account(
+                "Dieses Konto ist geschuetzt - als Follower angemeldet ist der "
+                "Beitrag lesbar.",
+                "Dieses Konto ist geschuetzt und folgt dem angemeldeten Konto nicht.",
+            )
         if "suspended" in lowered:
             return XUnavailableError("Dieses Konto ist gesperrt.")
         if "rate limit" in lowered or "too many requests" in lowered:
@@ -382,10 +653,32 @@ class XAdapter:
                 "X hat die Anfrage vorerst abgelehnt - bitte spaeter erneut versuchen."
             )
         if "log in" in lowered or "login" in lowered or "authenticat" in lowered:
-            return XUnavailableError("X verlangt eine Anmeldung. Wird nicht unterstuetzt.")
+            return needs_account(
+                "X verlangt fuer diesen Beitrag eine Anmeldung.",
+                "X akzeptiert die gespeicherte Anmeldung fuer diesen Beitrag nicht.",
+            )
         if "not found" in lowered or "unavailable" in lowered or "deleted" in lowered:
             return XExtractionError("Beitrag nicht gefunden oder geloescht.")
         return XExtractionError(f"X could not be resolved: {error}")
+
+    @staticmethod
+    def _refuse_withheld(info: dict, logged_in: bool = False) -> None:
+        """Refuse a post X declined to describe, as that rather than as empty.
+
+        Decided from the absence of every field X would have stated, not from
+        the tombstone that caused it: the tombstone never reaches this layer -
+        the resolver has already turned it into an ordinary answer with no
+        formats and no facts - and reading it from the answer's own shape is
+        what makes this hold for an injected resolver too.
+
+        `logged_in` picks the sentence, and with it whether a login is offered.
+        X states no reason either way, so neither sentence claims one.
+        """
+        if any(info.get(field) for field in _DESCRIBED_FIELDS):
+            return
+        if logged_in:
+            raise XUnavailableError(_WITHHELD_REFUSAL)
+        raise XLoginRequiredError(_LOGIN_REFUSAL)
 
     @staticmethod
     def _refuse_unplayable(info: dict) -> None:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
 
 import pytest
@@ -296,6 +297,28 @@ async def test_a_storyboard_or_manifest_entry_is_not_offered_as_a_track():
 
     assert all("mhtml" not in source.url for source in media.sources)
     assert all(".m3u8" not in source.url for source in media.sources)
+
+
+@pytest.mark.asyncio
+async def test_the_resolution_never_runs_on_the_thread_that_awaits_it():
+    """A resolution on the event loop thread is a frozen window.
+
+    yt-dlp is synchronous, and on the GUI's loop thread every second it spends
+    is a second in which nothing repaints and no click is answered - measured
+    at 2.4 s for one X post, with the freeze watchdog reporting it.
+    """
+    payload = load("youtube_video.json")
+    resolved_on: list[threading.Thread] = []
+
+    def resolver(url: str) -> dict:
+        resolved_on.append(threading.current_thread())
+        return payload
+
+    await YouTubeAdapter(resolver=resolver).resolve(
+        f"https://www.youtube.com/watch?v={VIDEO_ID}"
+    )
+
+    assert resolved_on and resolved_on[0] is not threading.current_thread()
 
 
 # --- failure ---------------------------------------------------------------

@@ -5,7 +5,9 @@ media URLs replaced by synthetic ones and the account anonymised - the parts
 that could not go into a repository - and reduced to the fields the adapter
 reads. `x_post_hls_only.json` is the same answer with the progressive entries
 removed, which is what a post whose video X publishes only as a playlist looks
-like.
+like. `x_post_withheld.json` is what X answers for a post it shows only to a
+signed-in viewer: an answer with no formats and no facts at all, recorded field
+for field on 2026-09-07 with the post id anonymised.
 
 The cases that carry weight are the ones where the obvious shortcut invents a
 fact: X states no codecs on the files it *can* hand over, no quality label at
@@ -17,22 +19,39 @@ filled in from the extension, the dimensions or arithmetic.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
 from base_api.modules.errors import UnsupportedURLError
 from base_api.provider import MediaProvider
 
+from video_downloader.application.provider_refusal import ProviderLoginRequired
 from video_downloader.application.track_download import YTDLP_TRANSPORT
+from video_downloader.domain.site_session import SessionCookie, SiteSession
 from video_downloader.providers.x import (
     XAdapter,
     XExtractionError,
     XLiveNotSupportedError,
+    XLoginRequiredError,
     XNoSupportedSourceError,
     XUnavailableError,
     XUnsupportedTargetError,
     _canonical_post_id,
+    _rejects_session,
 )
+
+
+def session(*names: str) -> SiteSession:
+    """A stored X session carrying exactly `names`."""
+    return SiteSession.now("x.com", tuple(
+        SessionCookie(name, f"{name}-value", ".x.com") for name in names
+    ))
+
+
+def adapter_with(name: str, session_source) -> XAdapter:
+    payload = load(name)
+    return XAdapter(resolver=lambda url: payload, session_source=session_source)
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 POST_URL = "https://x.com/example_poster/status/2096518350553940450"
@@ -413,6 +432,209 @@ async def test_a_post_with_only_playlist_renditions_is_reported_as_such():
 
 
 @pytest.mark.asyncio
+async def test_a_post_x_withheld_is_not_reported_as_a_post_without_video():
+    """The two are one sentence in the resolver and must not be one here.
+
+    X answers a post it shows only to a signed-in viewer with a tombstone that
+    states no reason, and yt-dlp reports that as "no video could be found in
+    this tweet" - the words it also uses for a post of plain text. Told apart,
+    because the difference decides what the user does next: a post with no
+    video is a link to discard, and this one is not.
+    """
+    with pytest.raises(XUnavailableError) as refusal:
+        await adapter_for("x_post_withheld.json").resolve(POST_URL)
+
+    assert "Anmeldung" in str(refusal.value)
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_post_offers_the_login_that_could_open_it():
+    """The refusal has to carry what a login window needs, and nothing else.
+
+    Which is what keeps the window and the download service free of any
+    provider: they read these three attributes and never ask who raised it.
+    """
+    with pytest.raises(XLoginRequiredError) as refusal:
+        await adapter_for("x_post_withheld.json").resolve(POST_URL)
+
+    assert isinstance(refusal.value, ProviderLoginRequired)
+    assert refusal.value.site == "x.com"
+    assert refusal.value.login_url == "https://x.com/login"
+    assert refusal.value.required_cookies == ("auth_token", "ct0")
+
+
+@pytest.mark.asyncio
+async def test_a_post_withheld_from_the_signed_in_account_offers_nothing():
+    """Asking again for what already failed is the one useless thing here.
+
+    X answered the account, and the answer was no. Whatever the reason - it
+    states none - another login is not it, so this must not be the refusal that
+    opens a window.
+    """
+    with pytest.raises(XUnavailableError) as refusal:
+        await adapter_with(
+            "x_post_withheld.json", lambda: session("auth_token", "ct0")
+        ).resolve(POST_URL)
+
+    assert not isinstance(refusal.value, ProviderLoginRequired)
+    assert "angemeldeten Konto" in str(refusal.value)
+
+
+@pytest.mark.asyncio
+async def test_half_a_session_is_treated_as_none():
+    """Without `auth_token`, X answers exactly as it does to a stranger.
+
+    So the offer to sign in has to come back - the one sentence that would be
+    certainly wrong here is "your account may not see this".
+    """
+    with pytest.raises(XLoginRequiredError):
+        await adapter_with("x_post_withheld.json", lambda: session("ct0")).resolve(POST_URL)
+
+
+@pytest.mark.asyncio
+async def test_a_session_store_that_fails_costs_the_session_and_not_the_job():
+    """A resolution that would have worked anonymously must still work."""
+    def broken():
+        raise RuntimeError("the session file is unreadable")
+
+    media = await adapter_with("x_post.json", broken).resolve(POST_URL)
+
+    assert media.provider == "x"
+    assert len(media.sources) == 4
+
+
+#: X's own words for a session it will not accept, measured on 2026-09-07 by
+#: resolving a post with a deliberately invalid `auth_token`.
+REJECTED = (
+    "ERROR: [twitter] 2076443698288566337: Error(s) while querying API: "
+    "Could not authenticate you"
+)
+
+
+@pytest.mark.parametrize(
+    ("message", "rejected"),
+    [
+        (REJECTED, True),
+        ("HTTP Error 401: Unauthorized", True),
+        # Narrow on purpose: a post that merely demands a login is a refusal to
+        # report, not a session to throw away.
+        ("NSFW tweet requires authentication", False),
+        ("You have to log in to view this", False),
+        ("No video could be found in this tweet", False),
+    ],
+)
+def test_only_x_refusing_the_session_itself_counts_as_a_dead_session(message, rejected):
+    assert _rejects_session(message) is rejected
+
+
+@pytest.mark.asyncio
+async def test_a_session_x_rejects_is_dropped_and_the_post_resolved_without_it():
+    """The hazard this answers: X does not fall back on its own.
+
+    Measured on 2026-09-07 with an invalid `auth_token` - a *public* post failed
+    with "Could not authenticate you", where the same request carrying no
+    session at all had been answered in full. So an expired login would have
+    broken every X download until the user worked out that signing out fixes it.
+    """
+    from yt_dlp.utils import DownloadError
+
+    payload = load("x_post.json")
+    attempts: list[int] = []
+    forgotten: list[bool] = []
+
+    def resolver(url: str) -> dict:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise DownloadError(REJECTED)
+        return payload
+
+    media = await XAdapter(
+        resolver=resolver,
+        session_source=lambda: session("auth_token", "ct0"),
+        forget_session=lambda: forgotten.append(True),
+    ).resolve(POST_URL)
+
+    assert len(media.sources) == 4
+    assert len(attempts) == 2
+    assert forgotten == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_post_that_still_needs_a_login_offers_one_after_the_session_is_dropped():
+    """The retry is anonymous, so what comes back is the offer to sign in again.
+
+    Which is the answer that fits: the stored session was refused, and the post
+    needs one - so a fresh login is exactly what is missing.
+    """
+    from yt_dlp.utils import DownloadError
+
+    def resolver(url: str) -> dict:
+        raise DownloadError(REJECTED)
+
+    adapter = XAdapter(
+        resolver=resolver, session_source=lambda: session("auth_token", "ct0")
+    )
+
+    with pytest.raises(XLoginRequiredError):
+        await adapter.resolve(POST_URL)
+
+
+@pytest.mark.asyncio
+async def test_a_store_that_cannot_forget_does_not_fail_the_resolution():
+    from yt_dlp.utils import DownloadError
+
+    payload = load("x_post.json")
+    attempts: list[int] = []
+
+    def resolver(url: str) -> dict:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise DownloadError(REJECTED)
+        return payload
+
+    def broken_forget():
+        raise OSError("the session file is read-only")
+
+    media = await XAdapter(
+        resolver=resolver,
+        session_source=lambda: session("auth_token", "ct0"),
+        forget_session=broken_forget,
+    ).resolve(POST_URL)
+
+    assert media.provider == "x"
+
+
+@pytest.mark.asyncio
+async def test_a_described_post_without_video_stays_a_post_without_video():
+    """The other half of the pair: X described this one, and it has no video."""
+    payload = load("x_post.json")
+    payload["formats"] = []
+
+    with pytest.raises(XNoSupportedSourceError):
+        await XAdapter(resolver=lambda url: payload).resolve(POST_URL)
+
+
+@pytest.mark.asyncio
+async def test_the_resolution_never_runs_on_the_thread_that_awaits_it():
+    """A resolution on the event loop thread is a frozen window.
+
+    yt-dlp is synchronous and one post was measured at 2.4 s: on the GUI's loop
+    thread that is 2.4 s in which nothing repaints and no click is answered,
+    and the freeze watchdog reported exactly that.
+    """
+    payload = load("x_post.json")
+    resolved_on: list[threading.Thread] = []
+
+    def resolver(url: str) -> dict:
+        resolved_on.append(threading.current_thread())
+        return payload
+
+    await XAdapter(resolver=resolver).resolve(POST_URL)
+
+    assert resolved_on and resolved_on[0] is not threading.current_thread()
+
+
+@pytest.mark.asyncio
 async def test_a_live_broadcast_is_refused_without_a_media_request():
     payload = load("x_post.json")
     payload["is_live"] = True
@@ -426,6 +648,28 @@ async def test_an_answer_that_is_not_a_post_description_is_an_extraction_error()
     """yt-dlp returns `None` rather than raising for some failures."""
     with pytest.raises(XExtractionError):
         await XAdapter(resolver=lambda url: None).resolve(POST_URL)
+
+
+@pytest.mark.parametrize(
+    ("message", "signed_in", "offers_login"),
+    [
+        # Three of X's answers stop being true once someone is signed in.
+        ("NSFW tweet requires authentication", False, True),
+        ("NSFW tweet requires authentication", True, False),
+        ("This account is protected", False, True),
+        ("This account is protected", True, False),
+        ("You have to log in to view this", False, True),
+        ("You have to log in to view this", True, False),
+        # Two answer the same to everybody, and a login is never the answer.
+        ("Account has been suspended", False, False),
+        ("Rate limit exceeded", False, False),
+    ],
+)
+def test_only_a_refusal_a_login_could_lift_offers_one(message, signed_in, offers_login):
+    failure = XAdapter._classify(message, RuntimeError(message), logged_in=signed_in)
+
+    assert isinstance(failure, XUnavailableError)
+    assert isinstance(failure, ProviderLoginRequired) is offers_login
 
 
 @pytest.mark.parametrize(

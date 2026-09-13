@@ -203,7 +203,7 @@ async def test_the_job_passes_through_muxing_on_its_way_to_completed(tracks, tmp
         media = media_with_tracks(base_url, {k: len(v) for k, v in tracks.items()})
         session = session_for(media)
         job = DownloadJob(url=WATCH_URL, quality="best", output_dir=tmp_path)
-        job.on_change = lambda changed: seen.append(changed.state)
+        job.add_listener(lambda changed: seen.append(changed.state))
 
         await run_download_job(job, session_factory=lambda: session)
 
@@ -220,9 +220,9 @@ async def test_progress_is_one_bar_over_both_tracks_and_the_mux(tracks, tmp_path
         media = media_with_tracks(base_url, {k: len(v) for k, v in tracks.items()})
         session = session_for(media)
         job = DownloadJob(url=WATCH_URL, quality="best", output_dir=tmp_path)
-        job.on_change = lambda changed: seen.append(
+        job.add_listener(lambda changed: seen.append(
             (changed.downloaded_segments, changed.total_segments)
-        )
+        ))
 
         await run_download_job(job, session_factory=lambda: session)
 
@@ -259,7 +259,7 @@ async def test_a_failed_track_names_which_one_and_keeps_the_other(tracks, tmp_pa
         await run_download_job(job, session_factory=lambda: session)
 
     assert job.state == LifecycleState.FAILED
-    assert "audio" in job.error
+    assert "audio" in str(job.error)
     work_dir = job.state_file.parent / job.id
     assert (work_dir / "video.mp4").exists(), "the finished track must survive"
 
@@ -305,13 +305,18 @@ async def test_a_large_download_asks_first_and_stops_when_refused(tracks, tmp_pa
         session = session_for(media)
         job = DownloadJob(url=WATCH_URL, quality="best", output_dir=tmp_path)
         asked: list[int] = []
-        job.confirm_large_download = lambda _job, estimate: (asked.append(estimate), False)[1]
+
+        async def refuse(_job, estimate: int) -> bool:
+            asked.append(estimate)
+            return False
+
+        job.confirm_large_download = refuse
 
         await run_download_job(job, session_factory=lambda: session)
 
     assert asked and asked[0] > 2 * 1024**3
     assert job.state == LifecycleState.FAILED
-    assert "GiB" in job.error
+    assert "GiB" in str(job.error)
     assert not (tmp_path / "Two Track Video.mp4").exists()
 
 

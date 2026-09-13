@@ -48,10 +48,12 @@ The architecture of this application is highly modular. The core downloading log
   - **Channels / Pornstars / Creators:** input a URL for a Channel, Pornstar or Creator, and the application orchestrates concurrent downloads for all of their videos and shorts.
 - **PeerTube** — a watch URL on any instance. One `GET /api/v1/videos/{id}` call resolves it, which is the same request the official web player makes. An instance that has downloading disabled is reported as such rather than failing obscurely.
 - **YouTube** — watch URLs, resolved through `yt-dlp`. YouTube publishes no combined format, so every download fetches a video track and an audio track and muxes them locally.
-- **X (formerly Twitter)** — single posts on `x.com` and `twitter.com`, including the `/i/web/status/…` form and the `/status/…/video/1` link X produces when an attachment is opened directly. X hands out finished progressive MP4s, so there is nothing to assemble. A profile, a feed, or a post that carries no video is refused with a sentence that says which of those it was.
+- **X (formerly Twitter)** — single posts on `x.com` and `twitter.com`, including the `/i/web/status/…` form and the `/status/…/video/1` link X produces when an attachment is opened directly. X hands out finished progressive MP4s, so there is nothing to assemble. A profile, a feed, or a post that carries no video is refused with a sentence that says which of those it was — and a post X hands out only to signed-in viewers is refused as *that*, which is a different thing entirely: X answers it with a tombstone that states no reason, and yt-dlp reports that in the same words it uses for a post of plain text.
 - **Direct media URLs** — an `.m3u8` or comparable technical media URL pasted straight in, with no site to scrape.
 
 Live broadcasts and Spaces are refused rather than downloaded.
+
+**Signing in to a site:** when a post needs a login, the application opens that site's own login page in a small window — X's captcha, two-factor and e-mail challenges only work there, and no password ever reaches this application. What it keeps is what a browser would have: the two session cookies (`auth_token`, `ct0`), encrypted with Windows DPAPI so the file is useless to another account or another machine, in `sessions.dat` and never in `settings.json`. The download then continues on its own. Signing in ahead of time and signing out again are both in the **Einstellungen** menu, and a session X later rejects is discarded by itself and the post resolved without it — an expired login never turns into "every X download fails". The command-line downloader has no window and therefore stays anonymous.
 
 **Future Extensibility:**
 Adding a site means writing one adapter that turns a URL into a `Media` with its list of `MediaSource` objects, and registering it in `create_provider_session()`. Selection, fetching, resume and muxing already work against that provider-neutral shape, and an adapter never touches the download engine's session — so a new site changes what can be downloaded without changing how downloading works.
@@ -97,6 +99,13 @@ poe -C $repo test                       # pytest over tests/
 poe -C $repo build                      # debug build   -> dist\dev
 poe -C $repo release                    # release build -> dist\release
 ```
+
+Both builds produce a **directory**, not a single file - `dist\dev\VideoDownloader.Debug\`
+and `dist\release\VideoDownloader\`. A onefile executable unpacks its entire payload
+into `%TEMP%` on every start, and that payload is 644 MB: Qt WebEngine, which the login
+window needs because X only accepts a login on its own page, is 342 MB of it and pulls
+another 72 MB of Qt Quick and QML along. So distribution is a folder - a zip or an
+installer - and startup stays immediate.
 
 Standing inside the repo, drop the `-C $repo` and it is just `poe test`.
 

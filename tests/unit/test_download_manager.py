@@ -124,7 +124,7 @@ class DownloadManagerTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(job.state, LifecycleState.FAILED)
             self.assertIsNotNone(job.error)
-            self.assertIn("async wait", job.error)
+            self.assertIn("async wait", str(job.error))
             self.assertEqual(core.configurations, [])  # nothing was downloaded
 
     async def test_cancel_isolation_and_delete(self):
@@ -141,7 +141,7 @@ class DownloadManagerTests(unittest.IsolatedAsyncioTestCase):
             await manager.cancel_download(job_a)
             self.assertEqual(job_a.state, LifecycleState.CANCELLED)
             self.assertFalse(job_b.stop_event.is_set())
-            await manager.delete_download(job_a)
+            await manager.delete_download(job_a, delete_file=True)
             self.assertNotIn(job_a, manager.get_jobs())
             await manager.shutdown()
 

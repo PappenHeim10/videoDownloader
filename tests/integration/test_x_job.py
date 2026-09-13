@@ -208,7 +208,12 @@ async def test_no_size_is_estimated_and_nothing_is_asked_about(tmp_path, resolve
     """
     asked: list[int] = []
     job = DownloadJob(url=POST_URL, quality="best", output_dir=tmp_path)
-    job.confirm_large_download = lambda _job, size: (asked.append(size), True)[1]
+
+    async def confirm(_job, size: int) -> bool:
+        asked.append(size)
+        return True
+
+    job.confirm_large_download = confirm
 
     await run_download_job(job, session_factory=lambda: session_for(x_media()))
 
@@ -226,15 +231,14 @@ async def test_the_progress_bar_takes_its_scale_from_the_download(tmp_path, reso
     """
     seen: list[tuple[int, int]] = []
     job = DownloadJob(url=POST_URL, quality="best", output_dir=tmp_path)
-    original = job.on_change
 
     def observe(changed: DownloadJob) -> None:
         if changed.total_segments:
             seen.append((changed.downloaded_segments, changed.total_segments))
-        if original is not None:
-            original(changed)
 
-    job.on_change = observe
+    # Angemeldet statt zugewiesen - der Beobachter muss keinen Vorgaenger
+    # mehr von Hand weiterreichen, um ihn nicht stummzuschalten.
+    job.add_listener(observe)
 
     await run_download_job(job, session_factory=lambda: session_for(x_media()))
 

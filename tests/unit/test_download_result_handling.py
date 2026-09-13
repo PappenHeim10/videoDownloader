@@ -111,7 +111,7 @@ async def test_deleting_a_completed_download_also_removes_the_file(tmp_path):
     manager._jobs[job.id] = job
 
     _handle_download_result(job, True)
-    await manager.delete_download(job)
+    await manager.delete_download(job, delete_file=True)
 
     assert not job.output_file.exists()
     assert job.id not in {j.id for j in manager.get_jobs()}
@@ -164,7 +164,7 @@ def test_progress_is_still_completed_to_full(tmp_path):
 def test_observers_see_the_final_path(tmp_path):
     job = _completed_job(tmp_path)
     seen: list[tuple[LifecycleState, Path | None]] = []
-    job.on_change = lambda j: seen.append((j.state, j.output_file))
+    job.add_listener(lambda j: seen.append((j.state, j.output_file)))
 
     _handle_download_result(job, True)
 
