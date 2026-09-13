@@ -15,7 +15,11 @@ from __future__ import annotations
 import logging
 
 from video_downloader.domain.site_session import SessionCookie, SiteSession
-from video_downloader.providers.ytdlp_options import base_options, install_session
+from video_downloader.providers.ytdlp_options import (
+    base_options,
+    enabled_js_runtimes,
+    install_session,
+)
 
 LOGGER_NAME = "video_downloader.providers.ytdlp_options"
 
@@ -165,3 +169,50 @@ def test_every_provider_reaches_the_resolver_through_these_options():
             )
 
     assert checked, "no provider was checked; the walk found nothing"
+
+
+# --- JavaScript runtimes ----------------------------------------------------
+
+
+def test_every_runtime_this_yt_dlp_supports_is_enabled():
+    """Enabling one does not choose it - yt-dlp still takes the best available.
+
+    Listed from yt-dlp's own registry rather than spelled out here, so a release
+    that adds a runtime does not silently leave it disabled.
+    """
+    from yt_dlp.globals import supported_js_runtimes
+
+    enabled = base_options()["js_runtimes"]
+
+    assert set(enabled) == set(supported_js_runtimes.value)
+    assert "node" in enabled, "the runtime that is actually installed here"
+
+
+def test_the_value_has_the_shape_yt_dlp_validates():
+    """The CLI parser produces a list; the Python API wants a dict of dicts.
+
+    Checked against `YoutubeDL` itself rather than against a reading of the
+    documentation, because `_clean_js_runtimes` raises on the wrong shape and
+    that is the contract that counts.
+    """
+    from yt_dlp import YoutubeDL
+
+    with YoutubeDL(base_options()) as downloader:
+        runtimes = downloader.params["js_runtimes"]
+
+    assert isinstance(runtimes, dict)
+    assert all(isinstance(config, dict) for config in runtimes.values())
+    assert "node" in runtimes, "yt-dlp dropped it as unsupported"
+
+
+def test_an_empty_registry_falls_back_to_the_default(monkeypatch):
+    """Disabling everything would be worse than changing nothing."""
+    from yt_dlp.globals import supported_js_runtimes
+
+    monkeypatch.setattr(supported_js_runtimes, "value", {})
+
+    assert enabled_js_runtimes() == {"deno": {}}
+
+
+def test_the_runtimes_can_still_be_overridden():
+    assert base_options(js_runtimes={"deno": {}})["js_runtimes"] == {"deno": {}}

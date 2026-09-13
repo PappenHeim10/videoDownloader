@@ -98,6 +98,38 @@ def install_session(resolver: Any, session: Any) -> None:
     )
 
 
+def enabled_js_runtimes() -> dict[str, dict]:
+    """Every JavaScript runtime this yt-dlp knows about, so it can use one.
+
+    Only `deno` is enabled by default, and a machine that has Node but no Deno
+    therefore extracts without a runtime at all. YouTube answers that by
+    throttling the delivery: measured on 2026-09-13, a 657 MB track arrived at
+    570 KB/s while the log carried yt-dlp's own warning that no runtime could be
+    found - with Node sitting on the PATH the whole time.
+
+    Enabling one does not choose it. yt-dlp keeps its own priority - deno, node,
+    quickjs, bun - and takes the highest one that is actually installed, so this
+    only widens what counts as installed. A runtime that is not there costs an
+    availability check and nothing else, which is why the frozen build, where
+    none is bundled, behaves exactly as it did.
+
+    Asked from yt-dlp's own registry rather than listed here, for the same
+    reason `verify_extractors` asks it about extractors: the list moves between
+    releases and the registry does not. An empty registry falls back to the
+    default rather than to nothing, because disabling deno would be worse than
+    changing nothing at all.
+
+    ⚠ Worth stating plainly: a runtime is enabled so that YouTube's own player
+    code can be executed locally to solve its challenge. That is what the
+    challenge is, and it is what the default `deno` would have done all along -
+    but it starts actually happening here rather than silently failing.
+    """
+    from yt_dlp.globals import supported_js_runtimes
+
+    names = tuple(supported_js_runtimes.value)
+    return {name: {} for name in names} if names else {"deno": {}}
+
+
 def base_options(**overrides: Any) -> dict[str, Any]:
     """The yt-dlp options every call in this application starts from.
 
@@ -114,6 +146,8 @@ def base_options(**overrides: Any) -> dict[str, Any]:
     * `postprocessors=[]` and `writeinfojson=False` - no ffmpeg step, no
       metadata sidecar next to the user's video.
     * an injected logger, so nothing yt-dlp says reaches a log unredacted.
+    * `js_runtimes` - every runtime this yt-dlp supports, so an installed one is
+      actually used. See `enabled_js_runtimes`.
     """
     options: dict[str, Any] = {
         "quiet": True,
@@ -128,6 +162,7 @@ def base_options(**overrides: Any) -> dict[str, Any]:
         "writethumbnail": False,
         "writesubtitles": False,
         "logger": _RedactingLogger(),
+        "js_runtimes": enabled_js_runtimes(),
     }
     options.update(overrides)
     return options
