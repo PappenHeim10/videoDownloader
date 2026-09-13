@@ -5,20 +5,16 @@ to know which website a job came from:
 
 * `HTTP` goes through the engine's progressive transport, which owns resume,
   retries and atomic finalisation.
-* `YTDLP` goes through the resolver that produced the URL - unless one
-  one-byte request says our own transport can read the whole thing, in which
-  case it does. That probe is the whole reason the choice can be made per track
-  rather than per provider: the failure it guards against is a URL whose bytes
-  stop partway with no warning, and asking for the last byte answers exactly
-  that, for that track, at the cost of one request.
+* `YTDLP` goes through the resolver that produced the URL.
 
-  The same request also states the length, and for a provider that publishes
-  none that is the only honest number there is: X states no size at all, and a
-  tail read of one of its files answered `bytes 33007912-33007912/33007913` on
-  2026-09-07 - the exact length the download then transferred. So the probe
-  reports the total rather than a yes, which is what lets a track nobody sized
-  reach our own transport at all - with resume, retries and atomic
-  finalisation - instead of falling back to the resolver for want of a number.
+  It used to be able to leave that path: one request for the last byte proved
+  whether our own transport could read the whole file, and a track that passed
+  was fetched by the engine instead, for the resume, retries and atomic
+  finalisation the engine owns. That routing is switched off - see
+  `ROUTE_RESOLVER_TRACKS_TO_ENGINE`, which carries the measurement that turned
+  it off and the condition for turning it back on. The probe and the conversion
+  are kept for that day; with the switch off the probe is not even sent, because
+  the question it answers is one nobody asks any more.
 
 Progress is aggregated across every phase - each track, then the mux - so the
 bar moves once from zero to done rather than restarting per file.
@@ -62,6 +58,27 @@ _CONTENT_RANGE = re.compile(r"\Abytes\s+(\d+)-(\d+)/(\d+)\Z")
 #: Above this, a download is worth asking about. A 2160p60 VP9 track measured
 #: 1 362 269 481 bytes, so "one click, 1.4 GB, no warning" is a real sequence.
 LARGE_DOWNLOAD_BYTES = 2 * 1024**3
+
+#: Whether a resolver-resolved track may be fetched by the engine transport when
+#: a probe proves it can finish. **Measured off on 2026-09-13.**
+#:
+#: The routing was built for what the engine owns and the resolver does not:
+#: resume, retries, atomic finalisation. What it costs was never measured until
+#: a user reported a slow download. On one YouTube track - format 313, 2160p
+#: vp9, 311 597 023 bytes - on one machine within the same few minutes:
+#:
+#:     engine transport      556 KB/s
+#:     yt-dlp's downloader   the whole 297 MiB in under 35 s, 12-27 MiB/s
+#:
+#: At least sixteen times slower. Resume is worth a great deal, and it is not
+#: worth an order of magnitude: a two-hour stream turns from minutes into hours,
+#: which is its own kind of unreliability.
+#:
+#: Turn back on, and **re-measure**, once the progressive transport in
+#: `eaf_base_api` is fixed - the bottleneck is there rather than here, and
+#: nothing in this repository can fix it. `readable_total` and
+#: `as_engine_source` are kept against that day.
+ROUTE_RESOLVER_TRACKS_TO_ENGINE = False
 
 
 class TrackDownloadError(RuntimeError):
@@ -404,12 +421,13 @@ async def download_selection(
         extension = (source.track.container or "bin").strip().lower()
         track_path = work_dir / f"{role}.{extension}"
         fetch_source = source
-        if is_ytdlp(source):
+        if ROUTE_RESOLVER_TRACKS_TO_ENGINE and is_ytdlp(source):
             total = await readable_total(source)
             if total is not None:
                 # Our own transport owns resume, retries and atomic
                 # finalisation, so it is the better place to be whenever it can
-                # finish the job.
+                # finish the job - as long as it is not an order of magnitude
+                # slower at it. See the switch.
                 fetch_source = as_engine_source(source, total)
                 logger.info(
                     "Fetching the %s track through the engine transport (%d bytes).",
