@@ -26,9 +26,11 @@ it with a plausible value:
   `Content-Range` totals on 2026-09-07 it overstated all four formats of one
   post, by 2.52x, 2.69x, 2.81x and 5.70x. So `expected_size` stays unset, which
   avoids a large-download question asked about a number that is wrong by a
-  factor of six. The real total is not lost with it: the download layer reads
-  it off the one request for the last byte it makes anyway, to find out whether
-  it can fetch the file itself - see `readable_total`.
+  factor of six. The real total is not lost with it: the resolver reports the
+  length of the response it is actually reading while it downloads, which is
+  measured rather than derived. (Until 2026-09-13 it came from the download
+  layer's own last-byte probe instead; that probe is no longer sent - see
+  `ROUTE_RESOLVER_TRACKS_TO_ENGINE`.)
 
 Resolution goes through the same yt-dlp the YouTube adapter uses, on the same
 terms - no cookies, no verbose, a redacting logger - because every reason for
