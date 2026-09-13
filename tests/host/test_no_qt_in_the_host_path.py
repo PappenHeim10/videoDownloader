@@ -26,6 +26,10 @@ import pytest
 #: which used to reach Qt through `bootstrap` and now does not.
 HEADLESS_MODULES = [
     "video_downloader.composition",
+    # Rules that used to live in a window and now do not. Listed here so the
+    # move cannot be quietly undone by an import.
+    "video_downloader.application.download_directory",
+    "video_downloader.application.login_completion",
     "video_downloader.host.protocol",
     "video_downloader.host.asks",
     "video_downloader.host.events",

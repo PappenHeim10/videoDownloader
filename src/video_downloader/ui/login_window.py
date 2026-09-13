@@ -43,7 +43,8 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from video_downloader.domain.site_session import SessionCookie, SiteSession
+from video_downloader.application.login_completion import LoginCollector
+from video_downloader.domain.site_session import SiteSession
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +73,11 @@ class SiteLoginWindow(QDialog):
     ) -> None:
         super().__init__(parent)
         self.site = site
-        self._required = tuple(required_cookies)
-        self._collected: dict[str, SessionCookie] = {}
+        # What "signed in" means is not a property of this window - it is a
+        # property of the site, and it lives in the application layer where it
+        # can be tested without a browser.
+        self._collector = LoginCollector(site, required_cookies)
+        self._required = self._collector.required
         self._settling: QTimer | None = None
         self.session: SiteSession | None = None
 
@@ -115,22 +119,16 @@ class SiteLoginWindow(QDialog):
     # --- collecting --------------------------------------------------------
 
     def _note(self, cookie: object) -> None:
-        """One cookie the page was given. Overwrites: the last value is current."""
-        name = cookie.name().data().decode("utf-8", "replace")
-        if name not in self._required:
-            return
-        self._collected[name] = SessionCookie(
-            name=name,
+        """One cookie the page was given, handed to the collector as it arrived."""
+        if self._collector.note(
+            name=cookie.name().data().decode("utf-8", "replace"),
             value=cookie.value().data().decode("utf-8", "replace"),
             domain=str(cookie.domain()),
-        )
-        logger.debug("Anmeldefenster: %s gesetzt", name)
-        self._begin_settling()
+        ):
+            self._begin_settling()
 
     def _forget(self, cookie: object) -> None:
-        name = cookie.name().data().decode("utf-8", "replace")
-        if self._collected.pop(name, None) is not None:
-            logger.debug("Anmeldefenster: %s entfernt", name)
+        self._collector.forget(cookie.name().data().decode("utf-8", "replace"))
 
     def _begin_settling(self) -> None:
         """Start the grace period once, as soon as a full pair is in hand."""
@@ -138,7 +136,7 @@ class SiteLoginWindow(QDialog):
             return
         logger.info(
             "Anmeldung an %s erkannt (%s); warte kurz auf die endgueltigen Werte.",
-            self.site, ", ".join(sorted(self._collected)),
+            self.site, ", ".join(self._collector.names),
         )
         self._settling = QTimer(self)
         self._settling.setSingleShot(True)
@@ -146,20 +144,16 @@ class SiteLoginWindow(QDialog):
         self._settling.start(_SETTLE_MS)
 
     def _complete(self) -> bool:
-        return all(
-            name in self._collected and self._collected[name].value
-            for name in self._required
-        )
+        return self._collector.is_complete
 
     def _finish(self) -> None:
         """Accept with the freshest values, or keep waiting if one was revoked."""
-        if not self._complete():
+        session = self._collector.session()
+        if session is None:
             # A cookie was withdrawn while settling - the login did not hold.
             self._settling = None
             return
-        self.session = SiteSession.now(
-            self.site, tuple(self._collected[name] for name in self._required)
-        )
+        self.session = session
         self.accept()
 
 
