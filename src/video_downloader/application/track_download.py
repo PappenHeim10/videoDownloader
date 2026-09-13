@@ -79,6 +79,12 @@ class _AggregateProgress:
     Each phase reports its own bytes from zero; the total is the sum of every
     phase's weight, and a phase that finishes short still counts as complete so
     the bar never goes backwards when the next one starts.
+
+    A phase whose provider stated no size starts weightless, and there is no
+    honest bar to draw until the download itself learns a total - so that one is
+    adopted when it arrives. Phases that *were* estimated keep their weight even
+    when the wire disagrees, which is what stops one of them pushing the bar past
+    a hundred percent.
     """
 
     def __init__(self, phases: list[_Phase], report: Callable[[int, int], None]) -> None:
@@ -90,8 +96,12 @@ class _AggregateProgress:
         phase = next(phase for phase in self._phases if phase.name == name)
 
         def callback(done: int, total: int) -> None:
-            # A phase may learn its real size mid-flight; the weight stays what
-            # was estimated, so one phase cannot push the bar past 100%.
+            if not phase.weight and total > 0:
+                # Nobody could estimate this one; the download just measured it.
+                phase.weight = total
+                self._total = sum(other.weight for other in self._phases)
+            # A phase may learn its real size mid-flight; an estimated weight
+            # stays what it was, so one phase cannot push the bar past 100%.
             phase.done = min(done, phase.weight) if phase.weight else done
             self._emit()
 
@@ -203,8 +213,14 @@ async def _download_via_resolver(
     target: Path,
     callback: Callable[[int, int], None],
     stop_event: asyncio.Event,
+    page_url: str,
 ) -> None:
     """Fetch one track with yt-dlp, one format selector per call.
+
+    `page_url` is the page the source was resolved from, carried in from the
+    `Media` rather than rebuilt here. Rebuilding it would mean knowing how each
+    provider spells a watch link, which is exactly the knowledge this layer
+    exists without.
 
     Never a `<video>+<audio>` selector: without ffmpeg on PATH yt-dlp aborts the
     merge *and discards what it downloaded*, which turns a missing tool into a
@@ -216,7 +232,7 @@ async def _download_via_resolver(
     from yt_dlp import YoutubeDL
     from yt_dlp.utils import DownloadCancelled
 
-    from video_downloader.providers.youtube import base_options
+    from video_downloader.providers.ytdlp_options import base_options
 
     identity = source.identity or ""
     format_id = identity.rsplit(":", 1)[-1]
@@ -248,12 +264,10 @@ async def _download_via_resolver(
         # yt-dlp resolve it again is the whole reason this path exists.
         noprogress=True,
     )
-    source_url = source.identity.split(":")[1] if source.identity else ""
-    watch_url = f"https://www.youtube.com/watch?v={source_url}"
 
     def run() -> None:
         with YoutubeDL(options) as downloader:
-            downloader.download([watch_url])
+            downloader.download([page_url])
 
     await asyncio.to_thread(run)
 
@@ -264,6 +278,7 @@ async def download_selection(
     core: Any,
     target: Path,
     work_dir: Path,
+    page_url: str,
     stop_event: asyncio.Event,
     report: Callable[[int, int], None],
     on_muxing: Callable[[], None] | None = None,
@@ -273,6 +288,10 @@ async def download_selection(
     The tracks land in `work_dir` and the finished file is moved onto `target`
     exactly once, at the end, so an existing download is never replaced by a
     half-written one.
+
+    `page_url` is the media's own page, needed only by the resolver path, which
+    re-resolves it to get a URL that has not expired since the selection was
+    made.
 
     Returns `None` when the stop event ended it, which is the same signal the
     engine's own transport gives - a stop is a result, not an exception, and
@@ -309,7 +328,8 @@ async def download_selection(
         try:
             if is_ytdlp(fetch_source):
                 await _download_via_resolver(
-                    fetch_source, track_path, progress.callback_for(role), stop_event
+                    fetch_source, track_path, progress.callback_for(role),
+                    stop_event, page_url,
                 )
             else:
                 await _download_via_engine(
