@@ -48,7 +48,7 @@ class ConsoleApp:
         # The same providers the GUI uses, from the same composition root.
         # Imported here rather than at module level so that parsing arguments and
         # printing the usage errors above never pulls Qt in.
-        from video_downloader.bootstrap import create_job_runner
+        from video_downloader.composition import create_job_runner
 
         self.manager = DownloadManager(directory, job_runner=create_job_runner())
         job = self.manager.add_download(video_url, self.args.quality, remux=not self.args.no_remux)

@@ -17,13 +17,15 @@ remux machinery comes from `eaf_base_api`, and one site adapter from
 ## Components
 
 ```text
-src/video_downloader/__main__.py  ·  debug_main.py
-        |
-        v
-    bootstrap.py            logging, exception handlers, qasync QSelectorEventLoop
-        |
-        +--> MainWindow             URL entry, job list, folder and login menu
-        |
+__main__.py · debug_main.py        cli/console_app.py      host/__main__.py
+        |                                  |                      |
+        v                                  |                      v
+    bootstrap.py   Qt window, qasync loop  |              Host    loopback socket,
+        |                                  |                      one front end
+        +--> MainWindow                    |                      |
+        |                                  v                      |
+        |                          composition.py   providers, job runner, logging
+        |                                  |                      |
         +--> DownloadManager        holds the jobs, semaphore of 3
                |
                +--> DownloadJob     one download's state; observable, loop-serialised
@@ -48,10 +50,32 @@ src/video_downloader/__main__.py  ·  debug_main.py
 
 ### Entry points
 
-`__main__.py` starts the production build, `debug_main.py` the debug one - the
-latter with `faulthandler`, a UI-freeze watchdog and console logging. Both call
-`bootstrap.run_application`. The console downloader is
-`cli/console_app.py` and imports no Qt at all.
+Three, and only the first has a window:
+
+| Entry point | What it starts |
+|---|---|
+| `__main__.py` · `debug_main.py` | the Qt window through `bootstrap.run_application`; the debug one adds `faulthandler`, a UI-freeze watchdog and console logging |
+| `cli/console_app.py` | the console downloader |
+| `host/__main__.py` | the core with no interface of its own, serving a separate front end over a socket |
+
+Only `bootstrap` imports Qt. Everything the other two need lives in
+`composition` - the provider registry, the job runner, logging and the exception
+handlers - and `tests/host/test_no_qt_in_the_host_path.py` keeps it that way
+from the outside.
+
+### The host
+
+`host/` serves one front end over a loopback socket, one JSON object per line.
+It exists so a user interface can live in another process - and another
+language - without the core learning anything about it: the commands are thin
+translations of calls that already existed, the events are what a job's
+listeners already emit, and the two questions are the two callables the job
+already had.
+
+The protocol is documented in `host-protocol.md`. What matters here is the
+shape: `protocol` is the vocabulary, `server` the socket, `handlers` the
+translation, `events` the outbound job stream, and `asks` the two questions plus
+what happens when nobody answers them.
 
 ### Application layer
 
