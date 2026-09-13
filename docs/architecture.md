@@ -1,89 +1,156 @@
-# Architekturhilfe des Video-Downloaders
+# Architecture guide
 
-Stand: 2026-08-28
+As of 2026-09-13.
 
-## Zweck der App
+## What the application is
 
-Die App ist ein asynchroner PySide6/qasync-Desktop-Downloader fuer HLS-Videos. Sie nimmt Video-URLs entgegen, laedt die Videometadaten, ermittelt eine M3U8-Playlist und laedt deren Segmente parallel herunter. Optional werden die geladenen Transport-Stream-Daten anschliessend in eine MP4-Datei remuxt. Multi-Download wird durch den `DownloadManager` unterstuetzt.
+An asynchronous desktop downloader for video. It takes a URL, resolves it to
+provider-neutral metadata, picks what to download, fetches it, and leaves one
+playable file behind. Three shapes of source are handled: segmented HLS
+playlists, single progressive files, and separate video and audio tracks that
+have to be muxed back together.
 
-Der Anwendungscode ist strukturiert im Verzeichnis `src/video_downloader`. Die eigentliche HTTP-, HLS- und Remux-Logik kommt aus den lokalen Paketen `xhamster-api` und `base-api` (unter `packages/`).
+The application code lives under `src/video_downloader`. The HTTP, HLS and
+remux machinery comes from `eaf_base_api`, and one site adapter from
+`xhamster_api`; both are pinned Git dependencies, not vendored copies.
 
-## Komponenten
+## Components
 
 ```text
-src/video_downloader/__main__.py / debug_main.py
+src/video_downloader/__main__.py  ·  debug_main.py
         |
         v
-    bootstrap.py (configure_logging, exception_handlers, qasync EventLoop)
+    bootstrap.py            logging, exception handlers, qasync QSelectorEventLoop
         |
-        v
-    DownloadManager (Verwaltet mehrere DownloadJobs, Semaphore für Concurrency)
+        +--> MainWindow             URL entry, job list, folder and login menu
         |
-        v
-    MainWindow (UI: Fortschrittsbalken, URL-Eingabe, Status-Updates)
-        |
-        +--> DownloadJob (Datenklasse fuer jeden aktiven Download)
-        |
-        +--> run_download_job (Isoliert in download_service.py)
+        +--> DownloadManager        holds the jobs, semaphore of 3
                |
-               +--> ProviderSession (pro Job, aus bootstrap.create_provider_session)
+               +--> DownloadJob     one download's state; observable, loop-serialised
+               |
+               +--> run_download_job (application/download_service.py)
                       |
-                      +--> ProviderRegistry.resolve(url) -> Media (+ MediaSource.headers)
-                      |      +--> XHamsterAdapter   (xhamster.com/.desi, eigener Extraktions-Client)
-                      |      +--> DirectMediaAdapter (direkte .m3u8-URLs, keine Header)
+                      +--> ProviderSession        one per job, closed by that job
+                      |      |
+                      |      +--> ProviderRegistry.resolve(url) -> Media
+                      |      |      +--> XHamsterAdapter     xhamster.com / .desi
+                      |      |      +--> PeerTubeAdapter     any instance's watch URL
+                      |      |      +--> YouTubeAdapter      via yt-dlp
+                      |      |      +--> XAdapter            x.com / twitter.com posts
+                      |      |      +--> DirectMediaAdapter  a bare .m3u8 and friends
+                      |      |
+                      |      +--> BaseCore        the provider-clean download engine
                       |
-                      +--> base_api.BaseCore.download(DownloadConfigHLS)   [provider-sauberer Core]
-                             +--> Manifest-/Playlist-/Segment-Requests mit MediaSource.headers
-                             +--> paralleler Segment-Download
-                             +--> Stop-Event, Resume-State, Remux
+                      +--> track_selection    what to download, from the Media alone
+                      +--> track_download     fetching it, one path per source type
+                      +--> muxing             two tracks into one container, losslessly
 ```
 
-### Startschicht: `__main__.py` und `debug_main.py`
+### Entry points
 
-Diese Skripte importieren `run_application` aus `bootstrap.py`. `debug_main.py` startet mit aktiviertem Debugging, einem Watchdog für UI-Freeze-Detection und ausführlichen Logs. `__main__.py` startet die Produktionsversion.
+`__main__.py` starts the production build, `debug_main.py` the debug one - the
+latter with `faulthandler`, a UI-freeze watchdog and console logging. Both call
+`bootstrap.run_application`. The console downloader is
+`cli/console_app.py` and imports no Qt at all.
 
-### Anwendungsschicht: `DownloadManager` und `DownloadJob`
+### Application layer
 
-Der `DownloadManager` orchestriert alle aktiven `DownloadJob`-Instanzen. Ein Job wird asynchron via `run_download_job` ausgefuehrt. Der Manager kontrolliert die maximale Anzahl gleichzeitiger Downloads über ein `asyncio.Semaphore(max_concurrent_downloads=3)`.
+`DownloadManager` owns the jobs and limits concurrency with an
+`asyncio.Semaphore(3)`. `run_download_job` drives one job through its states and
+knows no website: it asks the registry for a `Media`, lets `track_selection`
+choose, and hands the result to either the engine or the resolver.
 
-### UI-Schicht: `MainWindow`
+Two operations that used to be one are now separate:
 
-`MainWindow` nutzt PySide6. Es laedt regelmässig den Status aus den `DownloadJob`s und aktualisiert die ProgressBar und Label.
+* `cancel_download` stops the run and leaves everything on disk, including the
+  resume state.
+* `delete_download(job, delete_file=...)` removes the job. The keyword has **no
+  default**, so every caller states whether the file goes with it.
 
-### Provider-Schicht: `ProviderRegistry` und Adapter
+### The job as an observable value
 
-Die Registry waehlt anhand von `supports(url)` genau einen Provider aus und liefert dessen `resolve(url)` als provider-neutrales `Media` mit `MediaSource`-Liste zurueck. Passt keiner, kommt `UnsupportedURLError`; passen mehrere, `AmbiguousProviderError`. Registriert sind `XHamsterAdapter` (laedt die HTML-Seite und extrahiert die M3U8-URL) und `DirectMediaAdapter` (rein URL-basiert, ohne Netzwerk).
+`DownloadJob` is what the user interface reads. Three things about it matter
+more than its fields:
 
-Zwei Transport-Kontexte sind bewusst getrennt:
+* **It has listeners, not a listener.** `add_listener` / `remove_listener`;
+  a listener that raises is logged and skipped rather than stopping the
+  download.
+* **It applies its own changes on the loop that owns it.** Progress arrives from
+  worker threads - the yt-dlp hook, the mux, the engine's remux - and
+  `bind_loop()` plus `call_soon_threadsafe` is what serialises them. A change
+  from the loop thread queues too while anything is pending, so completion never
+  overtakes the progress it was meant to follow. `seq` makes the order
+  comparable.
+* **It can describe itself without the things that run it.** `JobSnapshot.of(job)`
+  is the same state minus the task, the event, the callables and the exception.
 
-* **Provider-Session (Extraktion)**: Jeder Adapter besitzt seinen eigenen Client. Was dessen Session an Zustand ansammelt - der xHamster-`Referer`, Cookies aus dem Seitenabruf - bleibt dort und endet mit `registry.close()`.
-* **`MediaSource.headers` (Medien-Download)**: Was die Medien-Requests einer Quelle mitschicken muessen, steht an der Quelle selbst (z. B. `Referer` fuer Hotlink-Schutz) und wird von `BaseCore` pro Request angewendet - auf Master-Manifest, Media-Playlist und jedes Segment inkl. Retries. Der Download-Core des Jobs bleibt provider-sauber; kein Adapter schreibt je auf seine Session. Praezedenz: Quell-Header schlagen Session-Header fuer genau diesen Request (case-insensitiv); die Session selbst wird nie veraendert. Eine direkte `.m3u8`-Quelle erbt dadurch keinen fremden `Referer` mehr.
+Failures are values, not sentences: `JobError(kind, code, message, retryable,
+cause)`, classified in `application/job_failure.py` from the exception hierarchy
+that already existed. `str(job.error)` still produces the text a user reads.
 
-### Download-Schicht: `packages/base-api`
+### UI layer
 
-`BaseCore` uebernimmt die technischen Aufgaben (HTTP-Requests, HLS-Playlist, Segment-Download, Remuxing). Die Schnittstelle unterstuetzt ein `threading.Event`, welches im asynchronen PySide6-Umfeld per `asyncio.to_thread(stop_event.wait)` ueberwacht wird, um ein UI-Freeze zu verhindern.
+`MainWindow` (PySide6) shows the job list and asks the two questions the core
+cannot answer itself - whether a large download should start, and whether the
+user wants to sign in to a site. Both are awaited rather than called, so the
+other downloads keep running while a dialog is open.
 
-## Lebenszyklus und Zustandsautomat
+`SiteLoginWindow` shows a site's own login page in an off-the-record Qt WebEngine
+profile and keeps nothing but the session cookies. It is imported lazily; a run
+that never signs in never loads WebEngine.
 
-Jeder `DownloadJob` verwendet `LifecycleState`:
+### Provider layer
+
+The registry selects exactly one provider by `supports(url)` and returns its
+`resolve(url)` as a provider-neutral `Media` with a list of `MediaSource`. No
+match is an `UnsupportedURLError`, more than one an `AmbiguousProviderError`.
+Registration happens in `bootstrap.create_provider_session`, and nowhere else.
+
+Two transport contexts are deliberately kept apart:
+
+* **Extraction.** Each adapter owns the client it scrapes with. Whatever that
+  session accumulates - a `Referer`, a cookie set during a page fetch - stays
+  there and dies with `registry.close()`.
+* **Media download.** What a media request must carry travels on
+  `MediaSource.headers` and is applied per request by `BaseCore`, on the master
+  manifest, the media playlist and every segment including retries. The download
+  core stays provider-clean, so a direct `.m3u8` never inherits a neighbour's
+  `Referer`.
+
+### Where files go
+
+Nothing is resolved against the working directory. `infrastructure/paths.py`
+puts configuration, logs and the session store in a per-user location
+(`%LOCALAPPDATA%\VideoDownloader` on Windows). The download directory itself is
+a user decision, persisted in `settings.json`, and asked for when it is missing.
+
+## Lifecycle
 
 ```text
-QUEUED
-  -> RUNNING (Fetch Metadata -> Downloading)
-  -> COMPLETED
-
-Oder Abbruch/Fehler:
-  -> CANCELLED
-  -> FAILED
+CREATED -> QUEUED -> CONNECTING -> FETCHING_METADATA -> DOWNLOADING
+                                                          |
+                                                    (MUXING) -> COMPLETED
+                                                          |
+                                              CANCELLED / FAILED
 ```
 
-## Fehler- und Exit-Code-Modell
+`MUXING` exists so the bar does not sit at 100 % with no file to open and
+nothing on screen explaining the wait.
 
-Ein GUI-Crash wirft eine Exception, die vom qasync Exception Handler oder dem allgemeinen `sys.excepthook` in der Logdatei (`runtime/logs/downloader.log`) protokolliert wird.
+## Maintenance rules
 
-## Wartungsregeln
-
-1. **Kein blockierender Code im Main-Thread**: `threading.Event().wait()` oder Netzwerk-Requests duerfen niemals direkt im QEventLoop ausgefuehrt werden (nutze `asyncio.to_thread` oder `aiohttp`).
-2. **Provider-Isolierung**: Fuer jeden `DownloadJob` erzeugt die injizierte Factory (`bootstrap.create_provider_session`) eine eigene `ProviderSession` - eigene Registry mit adapter-eigenen Extraktions-Clients plus ein provider-sauberer Download-`BaseCore` - und `run_download_job` schliesst sie im `finally`, auch bei Fehler und Abbruch. Ein gemeinsam genutztes Registry wuerde entweder pro Job die Session anderer laufender Jobs schliessen oder die bisherige Isolation aufgeben. Medien-Transport-Header gehoeren auf `MediaSource.headers`, nie auf die Session des Download-Cores.
-3. **Neue Website**: nur in `bootstrap.create_provider_session` registrieren. Der Download-Workflow kennt keine Website, sondern nur `Media`/`MediaSource`.
-4. **Abbruch**: Ueber `job.cancel()` wird das `stop_event` gesetzt. Das HLS-Backend beendet sich geordnet.
+1. **Nothing blocking on the loop.** A `threading.Event().wait()` or a network
+   call in the Qt loop freezes the window; use `asyncio.to_thread`.
+2. **Provider isolation.** Every job gets its own `ProviderSession` from the
+   injected factory, and `run_download_job` closes it in `finally` - on failure
+   and on cancellation too. Media transport headers belong on
+   `MediaSource.headers`, never on the download core's session.
+3. **A new website** is registered in `bootstrap.create_provider_session` and
+   changes nothing else. The download workflow knows `Media` and `MediaSource`,
+   not websites.
+4. **Cancellation** goes through `job.request_stop()`, which sets the stop event
+   immediately rather than queueing it.
+5. **The event loop kind is an application decision.** curl_cffi drives libcurl
+   through `add_reader`/`add_writer`, which a Windows proactor loop does not
+   have. The GUI builds `qasync.QSelectorEventLoop`; everything else goes
+   through `infrastructure.event_loop.new_event_loop`.

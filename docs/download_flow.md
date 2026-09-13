@@ -1,56 +1,117 @@
-# Code-Analyse: Download-Ablauf und Komponenten
+# The download flow
 
-Diese Dokumentation beschreibt die Architektur und den genauen Ablauf eines Video-Downloads in der Anwendung, basierend auf der Analyse der Code-Basis.
+How one download actually runs, from the URL to the finished file.
 
-## 1. Hauptkomponenten
+## 1. The components involved
 
-Die Anwendung ist modular aufgebaut und trennt die Benutzeroberfläche (bzw. CLI) strikt von der Download-Logik.
+*   **`DownloadJob` (`domain/download_job.py`)**
+    One download's complete state: URL, quality, title, `LifecycleState`,
+    progress counters and an `asyncio.Event` for cancellation. It is also the
+    thing the user interface watches - see §4.
 
-*   **`DownloadJob` (`download_job.py`)**: 
-    Eine Datenklasse (Data Class), die den vollständigen Zustand eines einzelnen Downloads kapselt. Sie enthält Metadaten (URL, Qualität, Titel), den aktuellen `LifecycleState` (z.B. `QUEUED`, `DOWNLOADING`, `COMPLETED`), Fortschrittsdaten sowie ein `asyncio.Event` (`stop_event`) für den sicheren Abbruch des asynchronen Tasks.
-*   **`DownloadManager` (`download_manager.py`)**: 
-    Verwaltet die Liste aller Downloads (`DownloadJob`s). Er kontrolliert die Start-, Stopp- und Löschvorgänge der Jobs. Optional kann er die maximale Anzahl gleichzeitiger Downloads über ein `asyncio.Semaphore` limitieren.
-*   **`run_download_job` (`download_service.py`)**: 
-    Die asynchrone Kernfunktion, die den tatsächlichen Download-Prozess steuert. Sie kennt keine Website: sie holt sich eine `ProviderSession`, lässt die `ProviderRegistry` die URL zu einem `Media` auflösen und übergibt dessen HLS-`MediaSource` an `BaseCore.download(...)`.
-*   **`ProviderSession` (`provider_session.py`)**: 
-    Die Provider-Ressourcen genau eines Jobs - Registry plus der `BaseCore`, mit dem der Job herunterlädt. Die Adapter besitzen ihre eigenen Extraktions-Clients (deren Session-Header und Cookies bleiben dort); der Download-Core bleibt provider-sauber. Zusammengesetzt wird die Session in `bootstrap.create_provider_session`, geschlossen genau einmal von dem Job, der sie erzeugt hat.
-*   **Einstiegspunkte (`main.py` / `downoader.py`)**: 
-    `main.py` startet die Qt-basierte Benutzeroberfläche (`PySide6`) gekoppelt mit einem `qasync` Event-Loop, während `downoader.py` (CLI) den Download direkt in der Konsole über die Standard-`asyncio`-Schleife ausführt.
+*   **`JobSnapshot` (`domain/job_snapshot.py`)**
+    The same state with nothing runnable in it: no task, no event, no callable,
+    no exception. What a consumer reads when it should not hold the job itself.
 
-## 2. Der genaue Download-Ablauf
+*   **`JobError` (`domain/job_error.py`)**
+    Why a job failed, as a value: category, code, message, whether a retry can
+    change anything, and the original exception for the log. Classified in
+    `application/job_failure.py` from the exception hierarchy that already
+    existed; `str(error)` is still the sentence a user reads.
 
-Der Download eines Videos durchläuft mehrere wohldefinierte Phasen (Lifecycles):
+*   **`DownloadManager` (`application/download_manager.py`)**
+    Holds the jobs, starts and stops them, and limits concurrency with an
+    `asyncio.Semaphore(3)`. Cancelling and deleting are separate operations.
 
-1.  **Job-Erstellung (State: `CREATED` $\rightarrow$ `QUEUED`)**:
-    *   Der Benutzer startet einen Download (über UI oder CLI).
-    *   `DownloadManager.add_download()` wird mit der URL, Qualität und der Remux-Option aufgerufen.
-    *   Ein neues `DownloadJob`-Objekt wird erstellt und in das interne Dictionary des Managers eingefügt. Der Status wechselt auf `QUEUED`.
-    *   Der Manager ruft `start_download()` auf, wodurch ein `asyncio.Task` für den Job erzeugt wird.
+*   **`run_download_job` (`application/download_service.py`)**
+    The asynchronous core of a download. It knows no website: it takes a
+    `ProviderSession`, lets the registry resolve the URL to a `Media`, picks
+    what to fetch, and fetches it.
 
-2.  **Verbindungsaufbau (State: `CONNECTING`)**:
-    *   Der `asyncio.Task` führt die Funktion `run_download_job()` aus.
-    *   Der Status wechselt zu `CONNECTING`. Die injizierte Factory erzeugt die `ProviderSession` dieses Jobs (eigene Registry mit adapter-eigenen Extraktions-Clients, eigener provider-sauberer Download-`BaseCore`).
+*   **`ProviderSession` (`application/provider_session.py`)**
+    One job's provider resources - the registry plus the `BaseCore` it downloads
+    with. Adapters own their extraction clients; the download core stays
+    provider-clean. Composed in `bootstrap.create_provider_session`, closed
+    exactly once by the job that created it.
 
-3.  **Metadaten abrufen (State: `FETCHING_METADATA`)**:
-    *   Der Status wechselt auf `FETCHING_METADATA`.
-    *   Mit `await session.registry.resolve(url)` wählt die Registry den passenden Provider und liefert ein `Media` (Titel, Autoren, `MediaSource`-Liste). Jede `MediaSource` trägt ihre eigenen Transport-Header (`MediaSource.headers`, z. B. den xHamster-`Referer`); eine direkte `.m3u8`-Quelle trägt keine.
-    *   Passt kein Provider (`UnsupportedURLError`) oder passen mehrere (`AmbiguousProviderError`), endet der Job als `FAILED`, ohne dass ein Download versucht wird - im Log getrennt von Netz-, Extraktions- und Segmentfehlern.
-    *   Der Ausgabepfad (`job.output_file`) wird auf Basis des Titels generiert (`{Titel}.mp4`) und genau so an die Engine weitergereicht.
+*   **Entry points**
+    `__main__.py` starts the Qt interface on a qasync loop; `debug_main.py` does
+    the same with debug logging and a watchdog; `cli/console_app.py` runs
+    headless on a plain selector loop and imports no Qt.
 
-4.  **Download-Phase (State: `DOWNLOADING`)**:
-    *   Der Status wechselt auf `DOWNLOADING`.
-    *   Eine interne `callback`-Funktion wird definiert. Diese Funktion empfängt die Download-Fortschritte (heruntergeladene vs. gesamte Segmente) und aktualisiert den Job. Um die UI nicht zu überlasten (UI-Freeze zu verhindern), werden die UI-Updates im Callback auf maximal alle 0.15 Sekunden limitiert ("coalescing").
-    *   Aus dem `Media` wird die HLS-`MediaSource` gewählt (sonst `UnsupportedProtocolError`) und `session.core.download(DownloadConfigHLS(...))` aufgerufen. Hier fließen die Qualitätsstufe, der Speicherpfad, die Callback-Funktion, die Remux-Einstellung, der Resume-State-Pfad und das `stop_event` des Jobs (für Abbrüche) ein. Die Header der `MediaSource` wendet `BaseCore` pro Request an - auf Master-Manifest, Media-Playlist und jedes Segment inkl. Retries; sie überschreiben Session-Header nur für den jeweiligen Request und verändern die Session nie.
-    *   Die Segmente des Transportstreams (TS) werden heruntergeladen und, falls konfiguriert, zu einer MP4-Datei geremuxt.
+## 2. The phases
 
-5.  **Abschluss & Aufräumen (State: `COMPLETED` / `CANCELLED` / `FAILED`)**:
-    *   Wurde das `stop_event` während des Downloads gesetzt (Abbruch durch User), wechselt der Status zu `CANCELLED`.
-    *   Tritt ein Fehler auf oder gibt der Download einen Fehler zurück, wird der Status auf `FAILED` gesetzt und die Fehlermeldung in `job.error` hinterlegt.
-    *   Ist der Download erfolgreich, wird der Status auf `COMPLETED` gesetzt, der Fortschritt auf 100% korrigiert und temporäre State-Dateien (`.state/{id}.json`) werden gelöscht.
-    *   Im `finally`-Block wird die `ProviderSession` des Jobs geschlossen (`await session.close()`) - genau einmal, auch bei Fehler und Abbruch.
+1.  **Created (`CREATED` -> `QUEUED`)**
+    `DownloadManager.add_download()` builds the job, binds it to the running
+    loop, registers it, and starts an `asyncio.Task`.
 
-## 3. Besonderheiten der Architektur
+2.  **Connecting (`CONNECTING`)**
+    The injected factory builds this job's `ProviderSession`: its own registry
+    with adapter-owned extraction clients, and its own provider-clean download
+    core.
 
-*   **Asynchrone Programmierung:** Die gesamte Download- und Netzwerklogik ist mit `asyncio` implementiert. In der GUI-Version (`main.py`) wird `qasync` verwendet, um die Qt-Event-Schleife mit `asyncio` zu verheiraten, sodass UI-Updates reibungslos funktionieren.
-*   **Zustands-Tracking (State Files):** Downloads erstellen eine Datei in einem `.state`-Unterordner. Dies ermöglicht potenziell die Wiederaufnahme (Resuming) von unvollständigen Downloads nach einem App-Absturz.
-*   **Event-getriebene Updates:** Die `DownloadJob`-Klasse ruft eine `on_change`-Methode auf, sobald sich Zustände oder der Fortschritt ändern. Dies ist ein Observer-Muster, wodurch die UI sofort reagieren kann, wenn sich im Backend etwas ändert.
+3.  **Metadata (`FETCHING_METADATA`)**
+    `await session.registry.resolve(url)` selects exactly one provider and
+    returns a `Media`. Each `MediaSource` carries its own transport headers.
+
+    If no provider matches, or more than one does, the job fails here without
+    downloading anything - logged apart from network and extraction failures, so
+    "this link is not ours" never reads like a broken connection.
+
+    If a provider refuses only because nobody is signed in, and somebody is
+    there to ask, the login window opens and the resolution is retried exactly
+    once.
+
+    The output path is built from the title through `strip_title()`, with the
+    extension of whatever was actually chosen - a file called `.mp4` that is
+    WebM inside is a lie the user only finds in a player.
+
+4.  **Selection and the size question**
+    `track_selection` picks from the `Media` alone - no requests, no guessing.
+    Either one finished file, or a video and an audio track to combine. If the
+    estimate exceeds 2 GiB and there is somebody to ask, the question is awaited
+    before the first byte; the other downloads keep running while it is open.
+
+5.  **Downloading (`DOWNLOADING`)**
+    Two paths, chosen per track by the source's own type:
+
+    * **The engine's transports.** HLS fetches the segments concurrently;
+      progressive HTTP owns resume, retries and atomic finalisation.
+    * **The resolver.** For a source only yt-dlp can produce - unless one
+      one-byte request at the far end of the file proves our own transport can
+      read all of it, in which case it does.
+
+    Progress is reported through a callback coalesced to at most one update
+    every 0.15 s. Across several phases it is aggregated into one bar, and while
+    any phase is still unweighed the total is reported as zero, which means
+    "end unknown" rather than a percentage that would still move.
+
+6.  **Muxing (`MUXING`)**
+    Two tracks go into one container, packet for packet, never re-encoded. Its
+    own state because otherwise the bar sits full with no file to open.
+
+7.  **Finishing (`COMPLETED` / `CANCELLED` / `FAILED`)**
+    A stop request ends the job as cancelled. A failure records a `JobError` and
+    the reason. Success sets the progress to 100 % and fills in the total from
+    what actually arrived, so a download nobody could weigh still reports that
+    it finished. The resume state is removed, and the `ProviderSession` is
+    closed in `finally` - once, on every path.
+
+## 3. Resume
+
+Each track writes its progress to its own state file while it downloads. A
+cancelled two-track job keeps the track that finished, so resuming costs one
+download rather than two.
+
+## 4. How the interface finds out
+
+`DownloadJob` notifies its listeners on every change - registered with
+`add_listener`, removed with `remove_listener`. A listener that raises is logged
+and skipped; a fault in a user interface must not stop a download.
+
+Progress arrives from worker threads: the yt-dlp hook, the mux and the engine's
+own remux all run in `asyncio.to_thread`. The job serialises those onto the loop
+it was bound to, and while anything is pending a change from the loop thread
+queues behind it - otherwise completion would overtake the last progress it was
+meant to follow. `seq` increments on every change, so two observations of the
+same job are comparable.
