@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from video_downloader.domain.download_job import DownloadJob, LifecycleState, ProgressUnit
+from video_downloader.application.download_directory import DownloadDirectory
 from video_downloader.application.download_manager import DownloadManager
 from video_downloader.infrastructure.session_store import SessionStore
 from video_downloader.infrastructure.settings import AppSettings
@@ -168,6 +169,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.manager = manager
         self.settings = settings or AppSettings()
+        # The rule for where downloads land lives in the application layer;
+        # this window only supplies the folder picker it asks with.
+        self.directory = DownloadDirectory(self.settings)
         # The same store the job registries read from, handed in by the
         # composition root. `None` means no login is on offer - a test, or a
         # window built without one - and the actions below say so rather than
@@ -215,30 +219,16 @@ class MainWindow(QMainWindow):
         return Path(chosen) if chosen else None
 
     def resolve_download_directory(self) -> Path | None:
-        """The directory the next job should use, asking the user if needed.
-
-        A stored directory that no longer exists counts as unset - AppSettings
-        reports it as absent - so we ask again rather than inventing a fallback
-        next to the executable or in the working directory.
-        """
-        configured = self.settings.get_download_directory()
-        if configured is not None:
-            return configured
-
-        chosen = self._ask_for_directory("Zielordner für Downloads wählen")
-        if chosen is None:
-            return None
-        return self.settings.set_download_directory(chosen)
+        """The directory the next job should use, asking through the picker."""
+        return self.directory.resolve(self._ask_for_directory)
 
     def change_download_directory(self) -> Path | None:
-        chosen = self._ask_for_directory("Neuen Zielordner für Downloads wählen")
-        if chosen is None:
+        """Pick a new destination, then make the list describe it."""
+        directory = self.directory.change(self._ask_for_directory)
+        if directory is None:
             return None
-        # Future jobs only. Running and finished jobs keep the directory they
-        # were created with, so nothing moves under the user's feet.
-        directory = self.settings.set_download_directory(chosen)
-        # Die Liste zeigte bis hierher die Dateien des alten Ordners weiter - sie
-        # beschrieb ein Verzeichnis, in das nichts mehr geschrieben wird.
+        # The list showed the files of the old folder until here - it described
+        # a directory nothing is written to any more.
         self.manager.rescan_output_directory(directory)
         self.rebuild_list()
         return directory

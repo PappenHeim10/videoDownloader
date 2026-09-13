@@ -18,6 +18,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
+from video_downloader.application.download_directory import DownloadDirectory
 from video_downloader.application.download_manager import DownloadManager
 from video_downloader.domain.download_job import DownloadJob
 from video_downloader.domain.site_session import SessionCookie, SiteSession
@@ -56,6 +57,9 @@ class CommandHandlers:
     ) -> None:
         self.manager = manager
         self.settings = settings
+        # The same rule the window uses. A front end over a connection has
+        # already done its own asking, so it only ever reaches `set`.
+        self.directory = DownloadDirectory(settings)
         self.sessions = sessions
         self.publisher = publisher
         self.asks = asks
@@ -137,7 +141,7 @@ class CommandHandlers:
     # --- settings ----------------------------------------------------------
 
     async def settings_get(self, _message: dict[str, Any]) -> dict[str, Any]:
-        return protocol.directory_payload(self.settings.get_download_directory())
+        return protocol.directory_payload(self.directory.current)
 
     async def settings_set_directory(self, message: dict[str, Any]) -> dict[str, Any]:
         raw = message.get("path")
@@ -148,7 +152,7 @@ class CommandHandlers:
         candidate = Path(str(raw)).expanduser()
         if not candidate.is_dir():
             raise CommandError(protocol.E_BAD_REQUEST, f"not a directory: {candidate}")
-        directory = self.settings.set_download_directory(candidate)
+        directory = self.directory.set(candidate)
         # Future jobs only, exactly as the window has always behaved - but the
         # scan follows, because otherwise the list keeps describing the old one.
         self.manager.rescan_output_directory(directory)
