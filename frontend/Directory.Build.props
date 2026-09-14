@@ -1,0 +1,24 @@
+<Project>
+
+  <!--
+    Shared settings for every project under frontend/.
+
+    The front end is a separate build from the Python core on purpose: the core
+    ships as a PyInstaller onedir and is started as a child process, so the two
+    never share a toolchain. What they do share is the wire protocol, and
+    docs/host-protocol.md is the single description of it.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- A warning here is a defect that has not failed yet. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+</Project>

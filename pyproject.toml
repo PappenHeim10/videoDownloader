@@ -62,6 +62,12 @@ host-check = { cmd = "python -m video_downloader.host --self-test", help = "Host
 test = { cmd = "pytest tests", env = { PYTHONPATH = "." }, help = "Testsuite ausfuehren" }
 build = { cmd = "python build.py dev", help = "Debug-Build nach dist/dev (Tests, PyInstaller, Smoke-Test)" }
 release = { cmd = "python build.py release", help = "Release-Build nach dist/release (immer clean)" }
+# The Avalonia front end is a separate toolchain - .NET, not Python - and it is
+# reachable the same way as everything else here rather than through a second
+# set of instructions somewhere. It needs no Python and no core to build.
+ui-build = { cmd = "dotnet build frontend/VideoDownloader.slnx", help = "Avalonia-Frontend bauen (.NET, braucht kein Python)" }
+ui-test = { cmd = "dotnet test frontend/VideoDownloader.slnx", help = "Protokoll-Client gegen einen Fake-Host testen (ohne Python)" }
+ui-run = { cmd = "dotnet run --project frontend/VideoDownloader.Desktop", help = "Avalonia-Frontend starten (Geruest, noch ohne Kern)" }
 
 [tool.pytest.ini_options]
 timeout = 30
