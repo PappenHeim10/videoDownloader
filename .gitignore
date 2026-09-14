@@ -13,6 +13,12 @@ build_*
 __pycache__/
 *.egg-info/
 
+# .NET build output (frontend/). The Python tree has no bin/ or obj/, so these
+# are safe to ignore repository-wide.
+bin/
+obj/
+*.user
+
 # environments / caches
 .venv/
 .pytest_cache/
