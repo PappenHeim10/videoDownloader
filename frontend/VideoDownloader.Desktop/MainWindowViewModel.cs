@@ -96,7 +96,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         }
     }
 
-    public async void CancelJobAsync(JobViewModel jobVm)
+    public async Task CancelJobAsync(JobViewModel jobVm)
     {
         if (_client == null) return;
         try
@@ -109,7 +109,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         }
     }
 
-    public async void DeleteJobAsync(JobViewModel jobVm)
+    public async Task DeleteJobAsync(JobViewModel jobVm)
     {
         if (_client == null) return;
         try
@@ -174,7 +174,14 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     {
         if (_client != null)
         {
-            try { await _client.ShutdownAsync(); } catch { }
+            try 
+            { 
+                await _client.ShutdownAsync(); 
+            } 
+            catch (Exception) 
+            { 
+                // Ignore shutdown errors, we are disposing anyway
+            }
             await _client.DisposeAsync();
         }
         _launcher?.Dispose();
