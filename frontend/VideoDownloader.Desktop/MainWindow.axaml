@@ -1,37 +1,67 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:desktop="clr-namespace:VideoDownloader.Desktop"
         x:Class="VideoDownloader.Desktop.MainWindow"
+        x:DataType="desktop:MainWindowViewModel"
         Title="Video Downloader"
         Width="760" Height="520"
         MinWidth="420" MinHeight="320">
 
-  <!--
-    Phase 4 is the skeleton: the project builds, and the protocol client it
-    references is covered by its own tests against a fake core. Connecting to a
-    real core - starting it as a child process and reading its handshake - is
-    phase 5, and the job list that goes here is phase 6.
-  -->
-  <Border Padding="32">
-    <StackPanel Spacing="16" VerticalAlignment="Center" HorizontalAlignment="Center">
-
-      <TextBlock Text="Video Downloader"
-                 FontSize="28" FontWeight="SemiBold"
-                 HorizontalAlignment="Center" />
-
-      <TextBlock x:Name="StatusText"
-                 FontSize="14" Opacity="0.75"
-                 TextWrapping="Wrap" TextAlignment="Center" MaxWidth="440" />
-
-      <Border Background="{DynamicResource SystemControlBackgroundListLowBrush}"
-              CornerRadius="6" Padding="16" MaxWidth="440">
-        <StackPanel Spacing="6">
-          <TextBlock Text="Noch nicht angeschlossen" FontWeight="SemiBold" />
-          <TextBlock TextWrapping="Wrap" Opacity="0.75" FontSize="13"
-                     Text="Diese Oberfläche startet den Kern noch nicht. Bis dahin bleibt die bisherige Anwendung unverändert startbar." />
-        </StackPanel>
-      </Border>
-
+  <Grid RowDefinitions="Auto,*,Auto" Margin="16">
+    <!-- Header: URL Input and Folder info -->
+    <StackPanel Grid.Row="0" Spacing="8" Margin="0,0,0,16">
+      <TextBlock Text="Video Downloader" FontSize="20" FontWeight="SemiBold" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <TextBox Text="{Binding NewJobUrl}" Watermark="Video-URL hier einfügen..." Width="400" />
+        <Button Content="Herunterladen" Command="{Binding AddJobCommand}" />
+      </StackPanel>
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <TextBlock Text="Zielordner:" FontWeight="SemiBold" VerticalAlignment="Center"/>
+        <TextBlock Text="{Binding DownloadDirectory}" VerticalAlignment="Center" />
+        <Button Content="Ändern" Command="{Binding ChangeDirectoryCommand}" Padding="8,4" />
+      </StackPanel>
     </StackPanel>
-  </Border>
 
+    <!-- Job List -->
+    <ListBox Grid.Row="1" ItemsSource="{Binding Jobs}">
+      <ListBox.ItemTemplate>
+        <DataTemplate DataType="{x:Type desktop:JobViewModel}">
+          <Border BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}" BorderThickness="1" CornerRadius="4" Padding="12" Margin="0,4">
+            <Grid ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto,Auto,Auto">
+              <!-- Title and Pseudo-Job Badge -->
+              <StackPanel Grid.Column="0" Grid.Row="0" Orientation="Horizontal" Spacing="8">
+                <TextBlock Text="{Binding DisplayTitle}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                <Border IsVisible="{Binding FromDisk}" Background="{DynamicResource SystemControlBackgroundAccentBrush}" CornerRadius="4" Padding="4,2">
+                  <TextBlock Text="Vorhanden" FontSize="11" Foreground="White" />
+                </Border>
+              </StackPanel>
+
+              <!-- Progress Bar -->
+              <ProgressBar Grid.Column="0" Grid.Row="1" Grid.ColumnSpan="3"
+                           Margin="0,8" Height="6"
+                           Value="{Binding Progress}"
+                           IsIndeterminate="{Binding IsIndeterminate}" />
+
+              <!-- Status Text and Errors -->
+              <StackPanel Grid.Column="0" Grid.Row="2" Orientation="Vertical">
+                <TextBlock Text="{Binding LocalizedState}" Opacity="0.75" />
+                <TextBlock Text="{Binding ErrorMessage}" Foreground="Red" IsVisible="{Binding HasError}" TextWrapping="Wrap" />
+              </StackPanel>
+
+              <!-- Action Buttons -->
+              <StackPanel Grid.Column="2" Grid.Row="0" Grid.RowSpan="3" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button Content="Abbrechen" Command="{Binding CancelCommand}" IsVisible="{Binding IsActive}" />
+                <Button Content="Löschen" Command="{Binding DeleteCommand}" />
+              </StackPanel>
+            </Grid>
+          </Border>
+        </DataTemplate>
+      </ListBox.ItemTemplate>
+    </ListBox>
+
+    <!-- Footer: Connection Status -->
+    <Border Grid.Row="2" Background="{DynamicResource SystemControlBackgroundListLowBrush}" CornerRadius="4" Padding="8" Margin="0,16,0,0">
+      <TextBlock Text="{Binding StatusText}" Opacity="0.75" />
+    </Border>
+  </Grid>
 </Window>
