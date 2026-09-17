@@ -26,10 +26,16 @@ public sealed class CoreLauncher : IDisposable
         {
             FileName = command,
             Arguments = arguments,
-            UseShellExecute = false,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
-            CreateNoWindow = true
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
         };
+
+        // Ensure Python can find the 'video_downloader' package inside the 'src' directory
+        startInfo.EnvironmentVariables["PYTHONPATH"] = "src";
 
         var process = new Process { StartInfo = startInfo };
         if (!process.Start())
