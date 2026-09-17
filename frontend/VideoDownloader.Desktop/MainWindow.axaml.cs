@@ -4,14 +4,14 @@ using VideoDownloader.Client;
 
 namespace VideoDownloader.Desktop;
 
-public sealed partial class MainWindow : Window
+public sealed partial class MainWindow : Window, IDialogService
 {
-    private MainWindowViewModel? _viewModel;
+    private readonly MainWindowViewModel _viewModel;
 
     public MainWindow()
     {
         InitializeComponent();
-        _viewModel = new MainWindowViewModel();
+        _viewModel = new MainWindowViewModel(this);
         DataContext = _viewModel;
         
         // Start the core when the window opens
@@ -21,9 +21,23 @@ public sealed partial class MainWindow : Window
     protected override async void OnClosing(WindowClosingEventArgs e)
     {
         base.OnClosing(e);
-        if (_viewModel != null)
+        await _viewModel.DisposeAsync();
+    }
+
+    public async Task<bool> ConfirmAsync(string title, string message)
+    {
+        var dialog = new ConfirmDialog(message) { Title = title };
+        return await dialog.ShowDialog<bool>(this);
+    }
+
+    public async Task<string?> PickFolderAsync()
+    {
+        var result = await StorageProvider.OpenFolderPickerAsync(new Avalonia.Platform.Storage.FolderPickerOpenOptions
         {
-            await _viewModel.DisposeAsync();
-        }
+            Title = "Download-Ordner auswählen",
+            AllowMultiple = false
+        });
+        
+        return result.Count > 0 ? result[0].Path.LocalPath : null;
     }
 }

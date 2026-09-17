@@ -12,8 +12,8 @@ public sealed class JobViewModel : ViewModelBase
     {
         _snapshot = snapshot;
         _parent = parent;
-        CancelCommand = new RelayCommand(_ => _parent.CancelJobAsync(this), _ => IsActive);
-        DeleteCommand = new RelayCommand(_ => _parent.DeleteJobAsync(this));
+        CancelCommand = new RelayCommand(async _ => await _parent.CancelJobAsync(this), _ => IsActive);
+        DeleteCommand = new RelayCommand(async _ => await _parent.DeleteJobAsync(this));
     }
 
     public string Id => _snapshot.Id;

@@ -7,6 +7,7 @@ namespace VideoDownloader.Desktop;
 
 public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 {
+    private readonly IDialogService _dialogService;
     private CoreLauncher? _launcher;
     private DownloadCoreClient? _client;
     
@@ -36,8 +37,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     public ICommand AddJobCommand { get; }
     public ICommand ChangeDirectoryCommand { get; }
 
-    public MainWindowViewModel()
+    public MainWindowViewModel(IDialogService dialogService)
     {
+        _dialogService = dialogService;
         AddJobCommand = new RelayCommand(async _ => await AddJobAsync());
         ChangeDirectoryCommand = new RelayCommand(async _ => await ChangeDirectoryAsync());
     }
@@ -114,13 +116,15 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         if (_client == null) return;
         try
         {
-            // Pseudo-jobs (FromDisk) represent existing files. Active jobs might also be finished files.
-            // But we must always ask before deleting the file! (Implementation of confirmation dialog goes to View).
-            // For now, we simulate asking, but wait, the plan says: "Rueckfrage vor Dateiloeschung".
-            // Since we can't show a dialog easily from ViewModel without a service, we'll implement a simple callback or event.
-            // For simplicity in this step, we just send deleteFile=true.
-            // A real app uses a DialogService.
-            bool deleteFile = true; // TODO: Wire up to Avalonia dialog
+            bool deleteFile = true;
+            if (!jobVm.FromDisk)
+            {
+                var confirmed = await _dialogService.ConfirmAsync(
+                    "Datei löschen?",
+                    $"Möchtest du '{jobVm.DisplayTitle}' wirklich von der Festplatte löschen?"
+                );
+                if (!confirmed) return;
+            }
             await _client.DeleteJobAsync(jobVm.Id, deleteFile);
         }
         catch (Exception ex)
@@ -132,11 +136,12 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private async Task ChangeDirectoryAsync()
     {
         if (_client == null) return;
-        // Feature: Ordnerwechsel aktualisiert die Liste
-        // Fake a dialog result for now, normally we'd open FolderPicker
-        var dummyPath = "C:\\Downloads"; // Placeholder
-        await _client.SetDownloadDirectoryAsync(dummyPath);
-        DownloadDirectory = dummyPath;
+        
+        var path = await _dialogService.PickFolderAsync();
+        if (path == null) return;
+        
+        await _client.SetDownloadDirectoryAsync(path);
+        DownloadDirectory = path;
         
         // Trigger rescan explicitly
         await _client.RescanAsync();
