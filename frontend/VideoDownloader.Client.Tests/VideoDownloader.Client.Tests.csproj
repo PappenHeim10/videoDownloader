@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Every test here runs against a fake core written in C#. No Python, no
+    PyInstaller artefact, no network: the protocol is a contract, and a contract
+    can be held to from one side alone. The matching half lives in
+    tests/host/test_host_conformance.py.
+  -->
+
+  <PropertyGroup>
+    <RootNamespace>VideoDownloader.Client.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VideoDownloader.Client\VideoDownloader.Client.csproj" />
+  </ItemGroup>
+
+</Project>

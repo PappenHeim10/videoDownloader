@@ -1,0 +1,37 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="VideoDownloader.Desktop.MainWindow"
+        Title="Video Downloader"
+        Width="760" Height="520"
+        MinWidth="420" MinHeight="320">
+
+  <!--
+    Phase 4 is the skeleton: the project builds, and the protocol client it
+    references is covered by its own tests against a fake core. Connecting to a
+    real core - starting it as a child process and reading its handshake - is
+    phase 5, and the job list that goes here is phase 6.
+  -->
+  <Border Padding="32">
+    <StackPanel Spacing="16" VerticalAlignment="Center" HorizontalAlignment="Center">
+
+      <TextBlock Text="Video Downloader"
+                 FontSize="28" FontWeight="SemiBold"
+                 HorizontalAlignment="Center" />
+
+      <TextBlock x:Name="StatusText"
+                 FontSize="14" Opacity="0.75"
+                 TextWrapping="Wrap" TextAlignment="Center" MaxWidth="440" />
+
+      <Border Background="{DynamicResource SystemControlBackgroundListLowBrush}"
+              CornerRadius="6" Padding="16" MaxWidth="440">
+        <StackPanel Spacing="6">
+          <TextBlock Text="Noch nicht angeschlossen" FontWeight="SemiBold" />
+          <TextBlock TextWrapping="Wrap" Opacity="0.75" FontSize="13"
+                     Text="Diese Oberfläche startet den Kern noch nicht. Bis dahin bleibt die bisherige Anwendung unverändert startbar." />
+        </StackPanel>
+      </Border>
+
+    </StackPanel>
+  </Border>
+
+</Window>

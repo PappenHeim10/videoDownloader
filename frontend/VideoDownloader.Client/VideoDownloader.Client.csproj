@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The protocol, and nothing else. No Avalonia reference here, deliberately:
+    the same rule the Python side enforces with tests/host/test_no_qt_in_the_host_path.py,
+    applied from the other end. A client that cannot be tested without a window
+    would be tested with one, and then barely.
+  -->
+
+  <PropertyGroup>
+    <RootNamespace>VideoDownloader.Client</RootNamespace>
+  </PropertyGroup>
+
+</Project>
