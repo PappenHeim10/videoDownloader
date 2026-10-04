@@ -42,10 +42,6 @@ Three shapes of source, all ending in one playable file:
 The architecture of this application is highly modular. The core downloading logic — HLS, concurrency, remuxing — is separated from the site-specific extraction logic. `create_provider_session()` in `bootstrap.py` is the single place that knows which sites are supported.
 
 **Currently Supported Sources:**
-
-- **xHamster** — via the `xhamster_api` package.
-  - **Single Videos & Shorts:** download any individual video or short.
-  - **Channels / Pornstars / Creators:** input a URL for a Channel, Pornstar or Creator, and the application orchestrates concurrent downloads for all of their videos and shorts.
 - **PeerTube** — a watch URL on any instance. One `GET /api/v1/videos/{id}` call resolves it, which is the same request the official web player makes. An instance that has downloading disabled is reported as such rather than failing obscurely.
 - **YouTube** — watch URLs, resolved through `yt-dlp`. YouTube publishes no combined format, so every download fetches a video track and an audio track and muxes them locally.
 - **X (formerly Twitter)** — single posts on `x.com` and `twitter.com`, including the `/i/web/status/…` form and the `/status/…/video/1` link X produces when an attachment is opened directly. X hands out finished progressive MP4s, so there is nothing to assemble. A profile, a feed, or a post that carries no video is refused with a sentence that says which of those it was — and a post X hands out only to signed-in viewers is refused as *that*, which is a different thing entirely: X answers it with a tombstone that states no reason, and yt-dlp reports that in the same words it uses for a post of plain text.
