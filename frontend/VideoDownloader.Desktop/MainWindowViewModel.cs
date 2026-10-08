@@ -50,8 +50,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         {
             StatusText = "Starte Kern als Kindprozess...";
             
-            // Note: in release this would be the compiled exe. During dev, we use python.
-            var command = "python";
+            // Note: in release this would be the compiled exe. During dev, we use the
+            // repository's virtual environment, never whatever "python" is on PATH.
+            var command = CoreLauncher.VirtualEnvironmentPython(".venv");
             var arguments = "-m video_downloader.host";
             
             var (launcher, handshake) = await CoreLauncher.StartAsync(command, arguments);

@@ -6,7 +6,7 @@ namespace VideoDownloader.Desktop.Tests;
 
 public class JobViewModelTests
 {
-    private JobSnapshot CreateSnapshot(string state = "created", double progress = 0.0, JobFailure? error = null, bool fromDisk = false, bool hasKnownTotal = true)
+    private static JobSnapshot CreateSnapshot(string state = "created", double progress = 0.0, JobFailure? error = null, bool fromDisk = false, bool hasKnownTotal = true)
     {
         return new JobSnapshot(
             Id: "test-id",

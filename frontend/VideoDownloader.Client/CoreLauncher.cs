@@ -17,6 +17,22 @@ public sealed class CoreLauncher : IDisposable
     }
 
     /// <summary>
+    /// The interpreter inside a virtual environment on the platform this runs on.
+    /// </summary>
+    public static string VirtualEnvironmentPython(string virtualEnvironment) =>
+        VirtualEnvironmentPython(virtualEnvironment, OperatingSystem.IsWindows());
+
+    /// <summary>
+    /// The interpreter inside a virtual environment. Windows puts it under
+    /// <c>Scripts\python.exe</c>, every other platform under <c>bin/python</c>;
+    /// a front end that assumes one layout cannot start the core on the other.
+    /// </summary>
+    public static string VirtualEnvironmentPython(string virtualEnvironment, bool windows) =>
+        windows
+            ? Path.Combine(virtualEnvironment, "Scripts", "python.exe")
+            : Path.Combine(virtualEnvironment, "bin", "python");
+
+    /// <summary>
     /// Starts the core process. The caller is responsible for disposing the launcher
     /// when the application exits, which will terminate the child process.
     /// </summary>
