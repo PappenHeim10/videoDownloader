@@ -58,15 +58,24 @@ class AskRegistry:
         return len(self._pending)
 
     async def ask(
-        self, message_type: str, payload: dict[str, Any], timeout: float
+        self,
+        message_type: str,
+        payload: dict[str, Any],
+        timeout: float,
+        *,
+        ask_id: str | None = None,
     ) -> Any:
         """Send a question and wait for its answer.
 
         Raises `AskUnavailable` when no answer can be had - never returns a
         default, because a default invented here would be indistinguishable
         from a real answer at the call site.
+
+        `ask_id` lets the caller name the question when something else must be
+        able to answer it - a login is answered by the core itself once the
+        cookies settle, and by the front end only when the user cancels.
         """
-        ask_id = uuid.uuid4().hex
+        ask_id = ask_id or uuid.uuid4().hex
         answer: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[ask_id] = answer
 

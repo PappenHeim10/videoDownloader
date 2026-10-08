@@ -24,6 +24,7 @@ from functools import partial
 
 from video_downloader.application.download_manager import DownloadManager
 from video_downloader.composition import (
+    SITE_LOGINS,
     configure_logging,
     create_job_runner,
     create_provider_session,
@@ -54,7 +55,9 @@ def build_host() -> Host:
         max_concurrent_downloads=3,
         job_runner=create_job_runner(partial(create_provider_session, sessions)),
     )
-    return Host(manager=manager, settings=settings, sessions=sessions)
+    return Host(
+        manager=manager, settings=settings, sessions=sessions, site_logins=SITE_LOGINS
+    )
 
 
 async def serve(*, self_test: bool = False) -> int:

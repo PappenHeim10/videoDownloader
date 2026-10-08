@@ -154,6 +154,12 @@ def create_provider_session(session_store: Any = None) -> ProviderSession:
     return ProviderSession(registry=registry, core=core)
 
 
+#: The sites a user can sign in to before any job asks for it. One entry per
+#: provider whose refusal carries a login, and each entry is that refusal: it
+#: already holds the three attributes a login window needs.
+SITE_LOGINS = (XLoginRequiredError,)
+
+
 def create_job_runner(
     session_factory: Callable[[], ProviderSession] = create_provider_session,
 ) -> Callable[[DownloadJob], object]:

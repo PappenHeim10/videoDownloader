@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from video_downloader.application.download_directory import DownloadDirectory
 from video_downloader.application.download_manager import DownloadManager
@@ -30,10 +30,16 @@ from video_downloader.host.asks import (
     AskUnavailable,
 )
 from video_downloader.host.events import JobEventPublisher
+from video_downloader.host.logins import LoginRegistry
 from video_downloader.infrastructure.session_store import SessionStore
 from video_downloader.infrastructure.settings import AppSettings
 
 logger = logging.getLogger(__name__)
+
+#: What a login ask resolves with when the core itself finished it. An object
+#: rather than `True`, so that a front end replying `true` to a login cannot
+#: pass for one that produced a session.
+_SIGNED_IN = object()
 
 
 class CommandError(Exception):
@@ -53,7 +59,9 @@ class CommandHandlers:
         sessions: SessionStore,
         publisher: JobEventPublisher,
         asks: AskRegistry,
+        send: Callable[[dict[str, Any]], bool],
         request_shutdown: Callable[[], None],
+        site_logins: Iterable[Any] = (),
     ) -> None:
         self.manager = manager
         self.settings = settings
@@ -63,7 +71,13 @@ class CommandHandlers:
         self.sessions = sessions
         self.publisher = publisher
         self.asks = asks
+        self._send = send
         self._request_shutdown = request_shutdown
+        # The sites a login can be started for, keyed by site. Each entry has
+        # the three attributes of `ProviderLoginRequired`; which providers
+        # those are is decided where the providers are composed, not here.
+        self.site_logins = {login.site: login for login in site_logins}
+        self.logins = LoginRegistry(self._signed_in)
 
     # --- jobs --------------------------------------------------------------
 
@@ -161,7 +175,11 @@ class CommandHandlers:
     # --- sessions ----------------------------------------------------------
 
     async def sessions_list(self, _message: dict[str, Any]) -> dict[str, Any]:
-        return {"sites": list(self.sessions.sites()), "persists": self.sessions.persists}
+        return {
+            "sites": list(self.sessions.sites()),
+            "persists": self.sessions.persists,
+            "logins": [protocol.site_login_payload(login) for login in self.site_logins.values()],
+        }
 
     async def sessions_put(self, message: dict[str, Any]) -> dict[str, Any]:
         session = _session_from(message)
@@ -176,6 +194,54 @@ class CommandHandlers:
         if not site:
             raise CommandError(protocol.E_BAD_REQUEST, "sessions.clear needs a site")
         return {"removed": self.sessions.clear(site)}
+
+    # --- logins ------------------------------------------------------------
+
+    async def login_start(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Start a login the user asked for, rather than one a job needed."""
+        site = str(message.get("site") or "")
+        login = self.site_logins.get(site)
+        if login is None:
+            raise CommandError(protocol.E_NOT_FOUND, f"no login is known for {site!r}")
+        login_id = self.logins.begin(login.site, login.required_cookies)
+        return {"loginId": login_id, **protocol.site_login_payload(login)}
+
+    async def login_observe(self, message: dict[str, Any]) -> dict[str, Any]:
+        login_id = str(message.get("loginId") or "")
+        cookies = message.get("cookies")
+        if not login_id or not isinstance(cookies, list):
+            raise CommandError(
+                protocol.E_BAD_REQUEST, "login.observe needs a loginId and a cookie list"
+            )
+        return {"active": self.logins.observe(login_id, cookies)}
+
+    async def login_cancel(self, message: dict[str, Any]) -> dict[str, Any]:
+        login_id = str(message.get("loginId") or "")
+        cancelled = self.logins.discard(login_id)
+        # A login a job asked for is also an open question; ending the login
+        # without ending the question would leave the job waiting for its
+        # timeout with nothing left to answer it.
+        self.asks.resolve(login_id, None)
+        return {"cancelled": cancelled}
+
+    def _signed_in(self, login_id: str, session: SiteSession) -> None:
+        """A login settled. Keep the session, and tell whoever showed the page."""
+        persisted = self.sessions.save(session)
+        logger.info(
+            "Signed in to %s (%s); %s",
+            session.site,
+            ", ".join(session.names()),
+            "stored" if persisted else "this run only",
+        )
+        self._send({
+            "type": protocol.LOGIN_FINISHED,
+            "loginId": login_id,
+            "site": session.site,
+            "signedIn": True,
+            "persisted": persisted,
+        })
+        # A no-op unless a job is waiting on this login.
+        self.asks.resolve(login_id, _SIGNED_IN)
 
     # --- application -------------------------------------------------------
 
@@ -205,42 +271,42 @@ class CommandHandlers:
         return bool(answer)
 
     async def request_login(self, refusal: Exception) -> bool:
-        """Have the front end run a site's login, and keep what it brings back.
+        """Have the front end show a site's login, and wait until it settles.
 
-        The cookies arrive from whoever showed the page; building the session
-        value and storing it happens here, so a front end never touches the
-        session store and cannot store one for a site it was not asked about.
+        The front end shows the page and reports its cookies; the decision that
+        they add up to a session, and storing it, happen here. A front end
+        never touches the session store and cannot store a session for a site
+        it was not asked about. Its only answer to the question itself is
+        `null`, for a user who closed the window.
         """
         site = getattr(refusal, "site", "")
-        payload = {
-            "site": site,
-            "loginUrl": getattr(refusal, "login_url", ""),
-            "requiredCookies": list(getattr(refusal, "required_cookies", ())),
-        }
+        login_id = self.logins.begin(site, getattr(refusal, "required_cookies", ()))
         try:
             answer = await self.asks.ask(
-                protocol.ASK_LOGIN, payload, LOGIN_TIMEOUT_SECONDS
+                protocol.ASK_LOGIN,
+                {"loginId": login_id, **protocol.site_login_payload(refusal)},
+                LOGIN_TIMEOUT_SECONDS,
+                ask_id=login_id,
             )
         except AskUnavailable as error:
             logger.info("Login request for %s unanswered: %s", site, error)
-            return False
+            answer = None
+        finally:
+            if self.logins.discard(login_id):
+                # Still open means it ended without a session - a timeout, or
+                # the front end went away. A window still showing the page
+                # should close rather than go on collecting for nobody.
+                self._send({
+                    "type": protocol.LOGIN_FINISHED,
+                    "loginId": login_id,
+                    "site": site,
+                    "signedIn": False,
+                    "persisted": False,
+                })
 
-        if not answer:
+        if answer is not _SIGNED_IN:
             logger.info("Login at %s was cancelled", site)
             return False
-
-        session = _session_from({"site": site, **answer}) if isinstance(answer, dict) else None
-        if session is None:
-            logger.warning("Login at %s answered without usable cookies", site)
-            return False
-
-        kept = self.sessions.save(session)
-        logger.info(
-            "Signed in to %s (%s); %s",
-            session.site,
-            ", ".join(session.names()),
-            "stored" if kept else "this run only",
-        )
         return True
 
 
