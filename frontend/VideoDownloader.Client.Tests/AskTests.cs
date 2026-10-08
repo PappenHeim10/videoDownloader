@@ -146,64 +146,81 @@ public sealed class AskTests
     }
 
     [Fact]
-    public async Task A_finished_login_hands_the_cookies_back()
+    public async Task A_login_question_arrives_as_a_page_to_show()
     {
         await using var core = new FakeCore();
         await using var client = new DownloadCoreClient();
 
-        LoginAsk? received = null;
+        var received = new TaskCompletionSource<LoginAsk>(TaskCreationOptions.RunContinuationsAsynchronously);
         client.RequestLogin = (ask, _) =>
         {
-            received = ask;
-            return Task.FromResult<IReadOnlyList<SessionCookie>?>(
-            [
-                new SessionCookie("auth_token", "secret-one", ".x.com"),
-                new SessionCookie("ct0", "secret-two", ".x.com"),
-            ]);
+            received.TrySetResult(ask);
+            return Task.FromResult(true);
         };
 
         await client.ConnectAsync(core.Handshake);
-        await core.SendAsync(new JsonObject
-        {
-            ["type"] = "ask.login",
-            ["askId"] = "q2",
-            ["site"] = "x.com",
-            ["loginUrl"] = "https://x.com/login",
-            ["requiredCookies"] = new JsonArray("auth_token", "ct0"),
-        });
+        await core.SendAsync(LoginQuestion());
 
-        var reply = await core.NextOfTypeAsync("ask.reply");
-        var cookies = reply.GetProperty("value").GetProperty("cookies");
-
-        Assert.Equal(["auth_token", "ct0"], received!.RequiredCookies);
-        Assert.Equal(2, cookies.GetArrayLength());
-        Assert.Equal("auth_token", cookies[0].GetProperty("name").GetString());
-        Assert.Equal(".x.com", cookies[0].GetProperty("domain").GetString());
+        var ask = await received.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("q2", ask.AskId);
+        Assert.Equal("q2", ask.Page.LoginId);
+        Assert.Equal("https://x.com/login", ask.Page.LoginUrl);
+        Assert.Equal(["auth_token", "ct0"], ask.Page.RequiredCookies);
     }
 
     [Fact]
-    public async Task A_cancelled_login_says_nothing_rather_than_half_a_session()
+    public async Task A_login_the_core_finished_is_not_answered_again()
     {
-        // Null is the answer for "the user closed the window". A half session is
-        // not one, and the core must never have to check whether what it got adds
-        // up to a login.
+        // The core resolves a job's login itself when the cookies settle. A reply
+        // from here would be a second answer to a question already closed.
         await using var core = new FakeCore();
         await using var client = new DownloadCoreClient();
-        client.RequestLogin = (_, _) => Task.FromResult<IReadOnlyList<SessionCookie>?>(null);
+        var handled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.RequestLogin = (_, _) =>
+        {
+            handled.TrySetResult();
+            return Task.FromResult(true);
+        };
 
         await client.ConnectAsync(core.Handshake);
-        await core.SendAsync(new JsonObject
-        {
-            ["type"] = "ask.login",
-            ["askId"] = "q2",
-            ["site"] = "x.com",
-            ["loginUrl"] = "https://x.com/login",
-            ["requiredCookies"] = new JsonArray("auth_token", "ct0"),
-        });
+        await core.NextOfTypeAsync("hello");
+        await core.SendAsync(LoginQuestion());
+        await handled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Whatever the client sends next, it must not be an answer.
+        var listing = client.ListJobsAsync();
+        var next = await core.NextAsync();
+        Assert.Equal("jobs.list", next.GetProperty("type").GetString());
+        await core.ReplyAsync(next.GetProperty("id").GetInt64(), new JsonObject { ["jobs"] = new JsonArray() });
+        await listing;
+    }
+
+    [Fact]
+    public async Task A_cancelled_login_answers_null()
+    {
+        // Null is the answer for "the user closed the window", and it is the only
+        // answer to a login the core takes from a front end.
+        await using var core = new FakeCore();
+        await using var client = new DownloadCoreClient();
+        client.RequestLogin = (_, _) => Task.FromResult(false);
+
+        await client.ConnectAsync(core.Handshake);
+        await core.SendAsync(LoginQuestion());
 
         var reply = await core.NextOfTypeAsync("ask.reply");
+        Assert.Equal("q2", reply.GetProperty("askId").GetString());
         Assert.Equal(JsonValueKind.Null, reply.GetProperty("value").ValueKind);
     }
+
+    private static JsonObject LoginQuestion() => new()
+    {
+        ["type"] = "ask.login",
+        ["askId"] = "q2",
+        ["loginId"] = "q2",
+        ["site"] = "x.com",
+        ["loginUrl"] = "https://x.com/login",
+        ["requiredCookies"] = new JsonArray("auth_token", "ct0"),
+    };
 
     [Fact]
     public void A_cookie_never_prints_its_value()
