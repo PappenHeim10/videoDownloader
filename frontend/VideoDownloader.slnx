@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="VideoDownloader.Client.Tests/VideoDownloader.Client.Tests.csproj" />
   <Project Path="VideoDownloader.Client/VideoDownloader.Client.csproj" />
+  <Project Path="VideoDownloader.Desktop.Tests/VideoDownloader.Desktop.Tests.csproj" />
   <Project Path="VideoDownloader.Desktop/VideoDownloader.Desktop.csproj" />
 </Solution>
