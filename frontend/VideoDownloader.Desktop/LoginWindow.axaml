@@ -1,0 +1,13 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="VideoDownloader.Desktop.LoginWindow"
+        Width="520" Height="760"
+        MinWidth="400" MinHeight="480"
+        WindowStartupLocation="CenterOwner">
+  <Grid RowDefinitions="Auto,*,Auto,Auto" Margin="12">
+    <TextBlock x:Name="Instruction" Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,8" />
+    <NativeWebView x:Name="Page" Grid.Row="1" />
+    <TextBlock x:Name="Note" Grid.Row="2" TextWrapping="Wrap" Opacity="0.75" Margin="0,8" />
+    <Button Grid.Row="3" Content="Abbrechen" HorizontalAlignment="Right" Click="OnCancelClick" />
+  </Grid>
+</Window>
