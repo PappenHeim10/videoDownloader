@@ -82,11 +82,18 @@ The first message must be `hello`. Anything else before it is answered with
 | `jobs.rescan` | — | `jobs[]` |
 | `settings.get` | — | `downloadDirectory` |
 | `settings.setDownloadDirectory` | `path` | `downloadDirectory` |
-| `sessions.list` | — | `sites[]`, `persists` |
+| `sessions.list` | — | `sites[]`, `persists`, `logins[]` |
 | `sessions.put` | `site`, `cookies[]` | `persisted` |
 | `sessions.clear` | `site` | `removed` |
+| `login.start` | `site` | `loginId`, `site`, `loginUrl`, `requiredCookies[]` |
+| `login.observe` | `loginId`, `cookies[]` | `active` |
+| `login.cancel` | `loginId` | `cancelled` |
 | `app.shutdown` | — | — |
 | `ask.reply` | `askId`, `value` | *(no result)* |
+
+`logins[]` in `sessions.list` names every site a login can be started for,
+as `{site, loginUrl, requiredCookies}`. A front end builds its sign-in menu
+from it and never names a site itself.
 
 `deleteFile` has no default and a missing one is `bad_request`. For an entry
 found by a directory scan, deleting removes a real video file that nobody
@@ -98,7 +105,12 @@ downloaded in this session, so the decision is never implied.
 {"type":"job.created","job":{…}}
 {"type":"job.changed","job":{…}}
 {"type":"job.removed","jobId":"…"}
+{"type":"login.finished","loginId":"…","site":"x.com","signedIn":true,"persisted":true}
 ```
+
+`login.finished` ends a login the front end is showing, and it is the only
+way one ends from the core's side: `signedIn` is `true` once the session is
+stored, `false` when the core gave up on it (a job's login that timed out).
 
 `job.created` is sent for a job the front end asked for; jobs that already
 existed when it connected arrive in the `hello` result instead. `job.changed`
@@ -140,10 +152,10 @@ before there was a protocol.
 The front end answers with `ask.reply` carrying the same `askId`:
 
 * for the size question, `value` is a boolean.
-* for the login, `value` is `null` when the user cancelled, or
-  `{"cookies":[{"name":…,"value":…,"domain":…}]}`. The core builds the session
-  value and stores it; a front end never touches the session store, and cannot
-  store a session for a site it was not asked about.
+* for the login, the only answer is `value: null`, when the user cancelled.
+  A login is not answered with cookies - see *Logins* below. `ask.login`
+  carries a `loginId` equal to its `askId`, and the core resolves the
+  question itself when the login settles.
 
 ### When no answer comes
 
@@ -158,6 +170,44 @@ A job is blocked on each of these, so all three failure modes are defined:
 In every case the core takes the conservative answer: the download does not
 start, and the refusal stands. Starting several gigabytes because the window
 that was meant to ask is gone is the failure the question exists to prevent.
+
+## Logins
+
+A login is shown by the front end and decided by the core. The front end opens
+the site's own page in an embedded browser and reports what cookies the page
+holds; the core decides when they add up to a session and stores it. A front
+end never touches the session store and cannot store a session for a site it
+was not asked about.
+
+There are two ways a login starts, and from then on they are the same:
+
+* a job needs one - the core sends `ask.login` with a `loginId`;
+* the user asks for one - the front end sends `login.start` for one of the
+  sites in `sessions.list`, and the result carries the `loginId`.
+
+While the page is open, the front end sends `login.observe` with every cookie
+the page holds, as `{name, value, domain}`, every 250 ms. Each one is a
+snapshot, not a delta: a required name that is missing from it counts as
+withdrawn. A snapshot for a login that has already ended answers
+`active: false` rather than an error, because a timer-driven front end will
+send one after the end now and then.
+
+The core applies the same rule the Qt window applied:
+
+* only the site's `requiredCookies` are kept;
+* the last value of a name wins;
+* once every required cookie is present and non-empty, the core waits 2 s for
+  rotated values and then stores the freshest ones. A cookie withdrawn during
+  the wait restarts it.
+
+Then it sends `login.finished` and, for a job's login, resolves the ask. The
+front end closes the page on `login.finished`, or sends `login.cancel` when the
+user closes it first. Every open login ends when the front end disconnects.
+
+Why snapshots and not one event per cookie: the embedded browser the Avalonia
+front end uses has no cookie events on any platform, only a pull API. The rule
+does not need events - it needs to observe the cookie state more often than its
+2 s settle period, and 250 ms is eight observations inside it.
 
 ## One front end
 

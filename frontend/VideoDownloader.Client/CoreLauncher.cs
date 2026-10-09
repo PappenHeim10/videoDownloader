@@ -60,6 +60,13 @@ public sealed class CoreLauncher : IDisposable
             throw new CoreProtocolException($"Failed to start core process: {command} {arguments}");
         }
 
+        // The core logs to stderr as well as to its log file. A redirected pipe
+        // nobody reads fills up after a few kilobytes, and then the core's next
+        // log line blocks - and with it the event loop every download runs on.
+        // The log file has every line, so this one is drained and dropped.
+        process.ErrorDataReceived += (_, _) => { };
+        process.BeginErrorReadLine();
+
         // Read the very first line from stdout which must be the handshake.
         var readTask = process.StandardOutput.ReadLineAsync();
         var line = await readTask.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -72,6 +79,29 @@ public sealed class CoreLauncher : IDisposable
 
         var handshake = CoreHandshake.Parse(line);
         return (new CoreLauncher(process), handshake);
+    }
+
+    /// <summary>
+    /// Wait for the core to exit on its own, up to <paramref name="grace"/>.
+    /// Returns whether it did. Disposing afterwards ends it if it did not.
+    /// </summary>
+    public async Task<bool> WaitForExitAsync(TimeSpan grace)
+    {
+        if (_disposed)
+        {
+            return true;
+        }
+
+        using var deadline = new CancellationTokenSource(grace);
+        try
+        {
+            await _process.WaitForExitAsync(deadline.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
     }
 
     public void Dispose()

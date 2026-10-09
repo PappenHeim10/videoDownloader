@@ -46,6 +46,9 @@ SETTINGS_SET_DIRECTORY = "settings.setDownloadDirectory"
 SESSIONS_LIST = "sessions.list"
 SESSIONS_PUT = "sessions.put"
 SESSIONS_CLEAR = "sessions.clear"
+LOGIN_START = "login.start"
+LOGIN_OBSERVE = "login.observe"
+LOGIN_CANCEL = "login.cancel"
 APP_SHUTDOWN = "app.shutdown"
 ASK_REPLY = "ask.reply"
 
@@ -54,7 +57,8 @@ ASK_REPLY = "ask.reply"
 COMMANDS = frozenset({
     HELLO, JOBS_LIST, JOBS_ADD, JOBS_CANCEL, JOBS_DELETE, JOBS_RESCAN,
     SETTINGS_GET, SETTINGS_SET_DIRECTORY, SESSIONS_LIST, SESSIONS_PUT,
-    SESSIONS_CLEAR, APP_SHUTDOWN, ASK_REPLY,
+    SESSIONS_CLEAR, LOGIN_START, LOGIN_OBSERVE, LOGIN_CANCEL, APP_SHUTDOWN,
+    ASK_REPLY,
 })
 
 # --- answers, events and asks (core -> front end) ---------------------------
@@ -63,6 +67,7 @@ RESULT = "result"
 JOB_CREATED = "job.created"
 JOB_CHANGED = "job.changed"
 JOB_REMOVED = "job.removed"
+LOGIN_FINISHED = "login.finished"
 ASK_CONFIRM_LARGE_DOWNLOAD = "ask.confirmLargeDownload"
 ASK_LOGIN = "ask.login"
 
@@ -185,6 +190,19 @@ def handshake(port: int, token: str) -> str:
         {"protocol": PROTOCOL_VERSION, "port": port, "token": token},
         separators=(",", ":"),
     )
+
+
+def site_login_payload(login: Any) -> dict[str, Any]:
+    """What a front end needs to show a site's login, and nothing else.
+
+    `login` is anything carrying the three attributes of `ProviderLoginRequired`
+    - the refusal class itself, in practice. No provider is named here.
+    """
+    return {
+        "site": login.site,
+        "loginUrl": login.login_url,
+        "requiredCookies": list(login.required_cookies),
+    }
 
 
 def directory_payload(directory: Path | None) -> dict[str, Any]:

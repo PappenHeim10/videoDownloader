@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterable
 
 from video_downloader.application.download_manager import DownloadManager
 from video_downloader.host import protocol
@@ -55,6 +55,7 @@ class Host:
         manager: DownloadManager,
         settings: AppSettings,
         sessions: SessionStore,
+        site_logins: Iterable[Any] = (),
         host: str = "127.0.0.1",
     ) -> None:
         self._manager = manager
@@ -73,7 +74,9 @@ class Host:
             sessions=sessions,
             publisher=self._publisher,
             asks=self._asks,
+            send=self._send,
             request_shutdown=self.request_shutdown,
+            site_logins=site_logins,
         )
         self._dispatch: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
             protocol.JOBS_LIST: self._handlers.jobs_list,
@@ -86,6 +89,9 @@ class Host:
             protocol.SESSIONS_LIST: self._handlers.sessions_list,
             protocol.SESSIONS_PUT: self._handlers.sessions_put,
             protocol.SESSIONS_CLEAR: self._handlers.sessions_clear,
+            protocol.LOGIN_START: self._handlers.login_start,
+            protocol.LOGIN_OBSERVE: self._handlers.login_observe,
+            protocol.LOGIN_CANCEL: self._handlers.login_cancel,
             protocol.APP_SHUTDOWN: self._handlers.app_shutdown,
         }
 
@@ -117,6 +123,7 @@ class Host:
     async def stop(self) -> None:
         """Stop listening, let go of every job, and end every open question."""
         self._asks.fail_all("the core is shutting down")
+        self._handlers.logins.discard_all("the core is shutting down")
         self._publisher.detach_all()
         if self._writer is not None:
             self._writer.close()
@@ -157,6 +164,8 @@ class Host:
             # question would otherwise wait for its timeout, and every attached
             # job would go on serialising snapshots for nobody.
             self._asks.fail_all("the front end disconnected")
+            # The pages showing these logins are gone with the front end.
+            self._handlers.logins.discard_all("the front end disconnected")
             self._publisher.detach_all()
             logger.info("Front end connection closed")
             writer.close()

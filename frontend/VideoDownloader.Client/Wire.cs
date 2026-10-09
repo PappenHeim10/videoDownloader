@@ -49,19 +49,39 @@ public sealed record JobFailure(string Kind, string Code, string Message, bool R
 /// <summary>The core asking whether to start a download it considers large.</summary>
 public sealed record LargeDownloadAsk(string AskId, string JobId, string? Title, long? EstimatedBytes);
 
-/// <summary>The core asking for a site login it cannot perform itself.</summary>
-public sealed record LoginAsk(string AskId, string Site, string LoginUrl, IReadOnlyList<string> RequiredCookies);
+/// <summary>A site a login can be shown for, as the core names it.</summary>
+public sealed record SiteLogin(string Site, string LoginUrl, IReadOnlyList<string> RequiredCookies);
 
-/// <summary>One cookie handed back to the core after a login.</summary>
+/// <summary>
+/// A login the core is watching: the page to show, and the id to report its
+/// cookies under. Started by the user (<c>login.start</c>) or by a job
+/// (<c>ask.login</c>) - from here on the two are the same.
+/// </summary>
+public sealed record LoginPage(string LoginId, string Site, string LoginUrl, IReadOnlyList<string> RequiredCookies);
+
+/// <summary>The core asking for a site login it cannot perform itself.</summary>
 /// <remarks>
-/// The core builds and stores the session from these; a front end never touches
-/// the session store, and cannot store a session for a site it was not asked
-/// about. Values are credentials: they are never logged, here or anywhere.
+/// Answered by showing <see cref="Page"/> and reporting its cookies, not by
+/// sending cookies back: the core decides when the login is finished.
+/// </remarks>
+public sealed record LoginAsk(string AskId, LoginPage Page);
+
+/// <summary>A login ended on the core's side.</summary>
+/// <param name="SignedIn">True once the session is stored; false when the core gave up on it.</param>
+/// <param name="Persisted">Whether the session outlives this run of the application.</param>
+public sealed record LoginOutcome(string LoginId, string Site, bool SignedIn, bool Persisted);
+
+/// <summary>One cookie a login page holds, reported to the core.</summary>
+/// <remarks>
+/// The core picks the ones it needs and builds the session from them; a front
+/// end never touches the session store, and cannot store a session for a site it
+/// was not asked about. Values are credentials: they are never logged, here or
+/// anywhere.
 /// </remarks>
 public sealed record SessionCookie(string Name, string Value, string Domain)
 {
     public override string ToString() => $"SessionCookie {{ Name = {Name}, Domain = {Domain}, Value = <redacted> }}";
 }
 
-/// <summary>What the core knows about stored site sessions.</summary>
-public sealed record SessionOverview(IReadOnlyList<string> Sites, bool Persists);
+/// <summary>What the core knows about site sessions, and which sites a login can be started for.</summary>
+public sealed record SessionOverview(IReadOnlyList<string> Sites, bool Persists, IReadOnlyList<SiteLogin> Logins);

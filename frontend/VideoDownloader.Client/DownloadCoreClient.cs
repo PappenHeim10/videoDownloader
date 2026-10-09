@@ -64,11 +64,20 @@ public sealed class DownloadCoreClient : IAsyncDisposable
     /// <summary>Answers the core's large-download question. Null means nobody is there to ask.</summary>
     public Func<LargeDownloadAsk, CancellationToken, Task<bool>>? ConfirmLargeDownload { get; set; }
 
+    /// <summary>A login ended on the core's side - signed in, or given up on.</summary>
+    public event Action<LoginOutcome>? LoginFinished;
+
     /// <summary>
-    /// Answers the core's login request with the collected cookies, or null when
-    /// the user cancelled.
+    /// Shows the page a job's login needs, reporting its cookies with
+    /// <see cref="ObserveLoginAsync"/>. Completes with true once the core
+    /// finished the login, false when the user closed the page.
     /// </summary>
-    public Func<LoginAsk, CancellationToken, Task<IReadOnlyList<SessionCookie>?>>? RequestLogin { get; set; }
+    /// <remarks>
+    /// Never answers with cookies: the core decides when a login is complete.
+    /// False sends the only answer the core accepts from a front end - that
+    /// nobody is going to sign in.
+    /// </remarks>
+    public Func<LoginAsk, CancellationToken, Task<bool>>? RequestLogin { get; set; }
 
     public bool IsConnected => _reader is { IsCompleted: false };
 
@@ -173,7 +182,48 @@ public sealed class DownloadCoreClient : IAsyncDisposable
         }
 
         var persists = data.TryGetProperty("persists", out var flag) && flag.ValueKind == JsonValueKind.True;
-        return new SessionOverview(sites, persists);
+        var logins = new List<SiteLogin>();
+        if (data.TryGetProperty("logins", out var offered) && offered.ValueKind == JsonValueKind.Array)
+        {
+            logins.AddRange(offered.EnumerateArray()
+                .Where(login => login.ValueKind == JsonValueKind.Object)
+                .Select(login => new SiteLogin(
+                    ReadNullableString(login, "site") ?? string.Empty,
+                    ReadNullableString(login, "loginUrl") ?? string.Empty,
+                    ReadStrings(login, "requiredCookies"))));
+        }
+
+        return new SessionOverview(sites, persists, logins);
+    }
+
+    /// <summary>Start a login the user asked for, for one of the sites in <see cref="SessionOverview.Logins"/>.</summary>
+    public async Task<LoginPage> StartLoginAsync(string site, CancellationToken cancellationToken = default)
+    {
+        var payload = new JsonObject { ["site"] = site };
+        var data = await SendCommandAsync("login.start", payload, cancellationToken).ConfigureAwait(false);
+        return ReadLoginPage(data);
+    }
+
+    /// <summary>
+    /// Report every cookie the login page holds right now. A snapshot, not a
+    /// change: a required cookie that is missing counts as withdrawn.
+    /// </summary>
+    /// <returns>Whether the login is still open. False is not an error - the
+    /// login finished while this snapshot was on its way.</returns>
+    public async Task<bool> ObserveLoginAsync(
+        string loginId, IReadOnlyList<SessionCookie> cookies, CancellationToken cancellationToken = default)
+    {
+        var payload = new JsonObject { ["loginId"] = loginId, ["cookies"] = CookiesToJson(cookies) };
+        var data = await SendCommandAsync("login.observe", payload, cancellationToken).ConfigureAwait(false);
+        return data.TryGetProperty("active", out var active) && active.ValueKind == JsonValueKind.True;
+    }
+
+    /// <summary>The user closed the login page. Ends a job's login question too.</summary>
+    public async Task<bool> CancelLoginAsync(string loginId, CancellationToken cancellationToken = default)
+    {
+        var payload = new JsonObject { ["loginId"] = loginId };
+        var data = await SendCommandAsync("login.cancel", payload, cancellationToken).ConfigureAwait(false);
+        return data.TryGetProperty("cancelled", out var flag) && flag.ValueKind == JsonValueKind.True;
     }
 
     public async Task<bool> PutSessionAsync(
@@ -331,6 +381,14 @@ public sealed class DownloadCoreClient : IAsyncDisposable
                     JobRemoved?.Invoke(ReadNullableString(message, "jobId") ?? string.Empty);
                     break;
 
+                case "login.finished":
+                    LoginFinished?.Invoke(new LoginOutcome(
+                        ReadNullableString(message, "loginId") ?? string.Empty,
+                        ReadNullableString(message, "site") ?? string.Empty,
+                        message.TryGetProperty("signedIn", out var signedIn) && signedIn.ValueKind == JsonValueKind.True,
+                        message.TryGetProperty("persisted", out var persisted) && persisted.ValueKind == JsonValueKind.True));
+                    break;
+
                 case "ask.confirmLargeDownload":
                     StartAsk(ReadLargeDownloadAsk(message));
                     break;
@@ -398,28 +456,37 @@ public sealed class DownloadCoreClient : IAsyncDisposable
                 _ => string.Empty,
             };
 
-            JsonNode? value;
+            JsonNode? value = null;
             try
             {
-                value = ask switch
+                switch (ask)
                 {
                     // No handler means nobody is there to ask, and the conservative
                     // answer is the refusal - the same answer the core takes when
                     // the front end is gone entirely.
-                    LargeDownloadAsk large => ConfirmLargeDownload is null
-                        ? JsonValue.Create(false)
-                        : JsonValue.Create(await ConfirmLargeDownload(large, _life.Token).ConfigureAwait(false)),
-                    LoginAsk login => RequestLogin is null
-                        ? null
-                        : LoginReply(await RequestLogin(login, _life.Token).ConfigureAwait(false)),
-                    _ => null,
-                };
+                    case LargeDownloadAsk large:
+                        value = JsonValue.Create(ConfirmLargeDownload is not null
+                            && await ConfirmLargeDownload(large, _life.Token).ConfigureAwait(false));
+                        break;
+
+                    case LoginAsk login:
+                        if (RequestLogin is not null
+                            && await RequestLogin(login, _life.Token).ConfigureAwait(false))
+                        {
+                            // The core finished this login itself and has already
+                            // resolved the question. There is nothing to answer.
+                            return;
+                        }
+
+                        break;
+                }
             }
             catch (Exception)
             {
                 // A handler that threw has not answered. Saying "no" is the only
-                // safe reading: starting several gigabytes, or storing a session
-                // that was never completed, are both worse than a refusal.
+                // safe reading: starting several gigabytes, or keeping a job
+                // waiting on a login page that is gone, are both worse than a
+                // refusal.
                 value = ask is LargeDownloadAsk ? JsonValue.Create(false) : null;
             }
 
@@ -435,9 +502,6 @@ public sealed class DownloadCoreClient : IAsyncDisposable
             }
         }, CancellationToken.None);
     }
-
-    private static JsonNode? LoginReply(IReadOnlyList<SessionCookie>? cookies) =>
-        cookies is null ? null : new JsonObject { ["cookies"] = CookiesToJson(cookies) };
 
     private static JsonArray CookiesToJson(IReadOnlyList<SessionCookie> cookies)
     {
@@ -520,17 +584,30 @@ public sealed class DownloadCoreClient : IAsyncDisposable
 
     private static LoginAsk ReadLoginAsk(JsonElement message)
     {
-        var required = new List<string>();
-        if (message.TryGetProperty("requiredCookies", out var array) && array.ValueKind == JsonValueKind.Array)
+        var askId = ReadNullableString(message, "askId") ?? string.Empty;
+        var page = ReadLoginPage(message);
+        // The core names the login after the question. A core from before
+        // loginId existed would leave it out; the question's id is the same one.
+        return new LoginAsk(askId, page.LoginId.Length == 0 ? page with { LoginId = askId } : page);
+    }
+
+    private static LoginPage ReadLoginPage(JsonElement message) => new(
+        LoginId: ReadNullableString(message, "loginId") ?? string.Empty,
+        Site: ReadNullableString(message, "site") ?? string.Empty,
+        LoginUrl: ReadNullableString(message, "loginUrl") ?? string.Empty,
+        RequiredCookies: ReadStrings(message, "requiredCookies"));
+
+    private static List<string> ReadStrings(JsonElement element, string name)
+    {
+        var strings = new List<string>();
+        if (element.TryGetProperty(name, out var array) && array.ValueKind == JsonValueKind.Array)
         {
-            required.AddRange(array.EnumerateArray().Select(name => name.GetString() ?? string.Empty));
+            strings.AddRange(array.EnumerateArray()
+                .Where(item => item.ValueKind == JsonValueKind.String)
+                .Select(item => item.GetString()!));
         }
 
-        return new LoginAsk(
-            AskId: ReadNullableString(message, "askId") ?? string.Empty,
-            Site: ReadNullableString(message, "site") ?? string.Empty,
-            LoginUrl: ReadNullableString(message, "loginUrl") ?? string.Empty,
-            RequiredCookies: required);
+        return strings;
     }
 
     private static string? ReadNullableString(JsonElement element, string name) =>

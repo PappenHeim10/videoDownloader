@@ -361,33 +361,147 @@ async def test_a_refused_size_question_answers_no(host, client):
     assert await asyncio.wait_for(asking, 5) is False
 
 
-@pytest.mark.asyncio
-async def test_the_login_question_stores_what_comes_back(host, client):
-    class Refusal(Exception):
-        site = "x.com"
-        login_url = "https://x.com/login"
-        required_cookies = ("auth_token", "ct0")
+class _XRefusal(Exception):
+    site = "x.com"
+    login_url = "https://x.com/login"
+    required_cookies = ("auth_token", "ct0")
 
-    asking = asyncio.ensure_future(host._handlers.request_login(Refusal()))
+
+SIGNED_IN = [
+    {"name": "guest_id", "value": "g", "domain": ".x.com"},
+    {"name": "auth_token", "value": "t", "domain": ".x.com"},
+    {"name": "ct0", "value": "c", "domain": ".x.com"},
+]
+
+
+@pytest.fixture
+def quick_settle(host):
+    # The rule is the same at 2 s and at 50 ms; the suite should not wait 2 s
+    # per login to prove it.
+    host._handlers.logins._settle_seconds = 0.05
+
+
+@pytest.mark.asyncio
+async def test_the_login_question_is_decided_by_the_core(host, client, quick_settle):
+    asking = asyncio.ensure_future(host._handlers.request_login(_XRefusal()))
     question = await client.wait_for(protocol.ASK_LOGIN)
 
     assert question["site"] == "x.com"
     assert question["loginUrl"] == "https://x.com/login"
     assert question["requiredCookies"] == ["auth_token", "ct0"]
+    assert question["loginId"] == question["askId"]
 
-    await client.send(
-        protocol.ASK_REPLY,
-        askId=question["askId"],
-        value={
-            "cookies": [
-                {"name": "auth_token", "value": "t", "domain": ".x.com"},
-                {"name": "ct0", "value": "c", "domain": ".x.com"},
-            ]
-        },
+    observed = await client.call(
+        protocol.LOGIN_OBSERVE, loginId=question["loginId"], cookies=SIGNED_IN
     )
+    assert observed == {"active": True}
+
+    finished = await client.wait_for(protocol.LOGIN_FINISHED)
+    assert finished["loginId"] == question["loginId"]
+    assert finished["signedIn"] is True
 
     assert await asyncio.wait_for(asking, 5) is True
     assert "x.com" in (await client.call(protocol.SESSIONS_LIST))["sites"]
+    # Only the required names leave the page - not guest_id.
+    assert host._handlers.sessions.load("x.com").names() == ("auth_token", "ct0")
+
+
+@pytest.mark.asyncio
+async def test_a_front_end_cannot_answer_a_login_with_cookies(host, client):
+    """The decision is the core's. Cookies sent as the answer store nothing."""
+    asking = asyncio.ensure_future(host._handlers.request_login(_XRefusal()))
+    question = await client.wait_for(protocol.ASK_LOGIN)
+
+    await client.send(protocol.ASK_REPLY, askId=question["askId"], value={"cookies": SIGNED_IN})
+
+    assert await asyncio.wait_for(asking, 5) is False
+    assert (await client.call(protocol.SESSIONS_LIST))["sites"] == []
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_login_ends_the_question(host, client):
+    asking = asyncio.ensure_future(host._handlers.request_login(_XRefusal()))
+    question = await client.wait_for(protocol.ASK_LOGIN)
+
+    answer = await client.call(protocol.LOGIN_CANCEL, loginId=question["loginId"])
+
+    assert answer == {"cancelled": True}
+    assert await asyncio.wait_for(asking, 5) is False
+
+
+@pytest.mark.asyncio
+async def test_the_sites_a_login_can_be_started_for_are_listed(videos):
+    settings = AppSettings()
+    settings.set_download_directory(videos)
+    served = Host(
+        manager=DownloadManager(videos, job_runner=_runs_until_stopped),
+        settings=settings,
+        sessions=SessionStore(),
+        site_logins=(_XRefusal,),
+    )
+    await served.start()
+    try:
+        client = await connect(served)
+        try:
+            listed = await client.call(protocol.SESSIONS_LIST)
+            assert listed["logins"] == [{
+                "site": "x.com",
+                "loginUrl": "https://x.com/login",
+                "requiredCookies": ["auth_token", "ct0"],
+            }]
+        finally:
+            client.close()
+    finally:
+        await served.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_login_the_user_started_is_stored_when_it_settles(host, client, quick_settle):
+    host._handlers.site_logins = {"x.com": _XRefusal}
+
+    started = await client.call(protocol.LOGIN_START, site="x.com")
+    assert started["loginUrl"] == "https://x.com/login"
+    assert started["requiredCookies"] == ["auth_token", "ct0"]
+
+    await client.call(protocol.LOGIN_OBSERVE, loginId=started["loginId"], cookies=SIGNED_IN)
+    finished = await client.wait_for(protocol.LOGIN_FINISHED)
+
+    assert finished == {
+        "type": protocol.LOGIN_FINISHED,
+        "loginId": started["loginId"],
+        "site": "x.com",
+        "signedIn": True,
+        "persisted": host._handlers.sessions.persists,
+    }
+    assert "x.com" in (await client.call(protocol.SESSIONS_LIST))["sites"]
+
+
+@pytest.mark.asyncio
+async def test_a_login_for_an_unknown_site_is_not_found(client):
+    message_id = await client.send(protocol.LOGIN_START, site="nowhere.test")
+    answer = await client.result_for(message_id)
+
+    assert answer["error"]["code"] == protocol.E_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_for_a_finished_login_is_not_an_error(client):
+    """The front end polls on a timer; one snapshot can cross the finish."""
+    answer = await client.call(protocol.LOGIN_OBSERVE, loginId="gone", cookies=[])
+
+    assert answer == {"active": False}
+
+
+@pytest.mark.asyncio
+async def test_a_disconnect_ends_every_open_login(host, client):
+    host._handlers.site_logins = {"x.com": _XRefusal}
+    await client.call(protocol.LOGIN_START, site="x.com")
+    assert host._handlers.logins.active_count == 1
+
+    client.close()
+    await asyncio.sleep(0.1)
+
+    assert host._handlers.logins.active_count == 0
 
 
 @pytest.mark.asyncio
