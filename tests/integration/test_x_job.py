@@ -38,6 +38,8 @@ from video_downloader.application.track_download import (
 )
 from video_downloader.application.track_selection import TrackSelection
 from video_downloader.domain.download_job import DownloadJob, LifecycleState
+from video_downloader.domain.site_session import SessionCookie, SiteSession
+from video_downloader.providers.x import XAdapter
 
 POST_URL = "https://x.com/example_poster/status/2096518350553940450"
 POST_ID = "2096518350553940450"
@@ -78,8 +80,18 @@ class FakeYoutubeDL:
 
     asked: list[tuple[tuple[str, ...], str]] = []
 
+    #: Whether the post is one X shows only to a signed-in viewer. Such a post
+    #: answers a resolver without `auth_token` in its jar the way X does: as a
+    #: post with no video at all.
+    signed_in_only = False
+
     def __init__(self, options: dict) -> None:
+        from http.cookiejar import CookieJar
+
         self._options = options
+        # yt-dlp builds its jar at construction; a session is installed into it
+        # afterwards, which is exactly what this double lets a test observe.
+        self.cookiejar = CookieJar()
 
     def __enter__(self) -> "FakeYoutubeDL":
         return self
@@ -90,6 +102,14 @@ class FakeYoutubeDL:
     def download(self, urls: list[str]) -> None:
         selector = self._options["format"]
         FakeYoutubeDL.asked.append((tuple(urls), selector))
+        if FakeYoutubeDL.signed_in_only and not any(
+            cookie.name == "auth_token" for cookie in self.cookiejar
+        ):
+            from yt_dlp.utils import DownloadError
+
+            raise DownloadError(
+                f"ERROR: [twitter] {POST_ID}: No video could be found in this tweet"
+            )
         body = BODIES[int(selector.rsplit("-", 1)[-1])]
         hook = (self._options.get("progress_hooks") or [None])[0]
         if hook is not None:
@@ -109,11 +129,12 @@ def resolver(monkeypatch):
     import yt_dlp
 
     FakeYoutubeDL.asked = []
+    FakeYoutubeDL.signed_in_only = False
     monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYoutubeDL)
     return FakeYoutubeDL
 
 
-def session_for(media: Media) -> ProviderSession:
+def session_for(media: Media, download_preparers: dict | None = None) -> ProviderSession:
     class Registry:
         async def resolve(self, url: str) -> Media:
             return media
@@ -130,7 +151,9 @@ def session_for(media: Media) -> ProviderSession:
         async def close(self) -> None:
             return None
 
-    return ProviderSession(registry=Registry(), core=NoCore())
+    return ProviderSession(
+        registry=Registry(), core=NoCore(), download_preparers=download_preparers or {}
+    )
 
 
 # --- routing ----------------------------------------------------------------
@@ -292,3 +315,84 @@ async def test_a_merged_format_selector_is_never_requested(tmp_path):
     # Reported as a failure of that track, which is what every other download
     # failure is: the caller learns which one, and a retry costs one download.
     assert isinstance(failure.value.cause, UnsupportedProtocolError)
+
+
+# --- a post only a signed-in viewer sees --------------------------------------
+#
+# The regression of 2026-10-09: the post resolved with the session, the download
+# re-resolved it without one, and X answered that second resolution with "no
+# video could be found in this tweet". Every age-restricted post failed this
+# way between 2026-09-13 and the fix.
+
+
+def signed_in() -> SiteSession:
+    return SiteSession.now("x.com", (
+        SessionCookie("auth_token", "token-value", ".x.com"),
+        SessionCookie("ct0", "csrf-value", ".x.com"),
+    ))
+
+
+@pytest.mark.asyncio
+async def test_a_post_only_a_signed_in_viewer_sees_is_downloaded_with_the_session(
+    tmp_path, resolver
+):
+    resolver.signed_in_only = True
+    adapter = XAdapter(session_source=signed_in)
+    job = DownloadJob(url=POST_URL, quality="best", output_dir=tmp_path)
+
+    await run_download_job(
+        job,
+        session_factory=lambda: session_for(
+            x_media(), {adapter.provider: adapter.prepare_download}
+        ),
+    )
+
+    assert job.state is LifecycleState.COMPLETED, job.error
+    assert job.output_file.read_bytes() == BODIES[1080]
+
+
+@pytest.mark.asyncio
+async def test_without_the_preparation_the_same_post_fails_as_it_used_to(tmp_path, resolver):
+    """The counter-test. Without it the one above could pass against a double
+    that never checked for a session at all."""
+    resolver.signed_in_only = True
+    job = DownloadJob(url=POST_URL, quality="best", output_dir=tmp_path)
+
+    await run_download_job(job, session_factory=lambda: session_for(x_media()))
+
+    assert job.state is LifecycleState.FAILED
+    assert "No video could be found" in str(job.error)
+
+
+@pytest.mark.asyncio
+async def test_a_preparation_is_used_only_for_its_own_provider(tmp_path, resolver):
+    """Looked up by the provider that resolved the media - a session registered
+    for one site must never be installed for another site's download."""
+    called: list[object] = []
+    job = DownloadJob(url=POST_URL, quality="best", output_dir=tmp_path)
+
+    await run_download_job(
+        job,
+        session_factory=lambda: session_for(
+            x_media(), {"some-other-site": called.append}
+        ),
+    )
+
+    assert job.state is LifecycleState.COMPLETED
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_the_composed_session_prepares_x_downloads(tmp_path, monkeypatch):
+    """Wiring, not behaviour: the production composition registers the X
+    adapter's preparation under the name its media carries."""
+    from video_downloader.composition import create_provider_session
+    from video_downloader.infrastructure.paths import HOME_ENV_VAR
+    from video_downloader.infrastructure.session_store import SessionStore
+
+    monkeypatch.setenv(HOME_ENV_VAR, str(tmp_path / "appdata"))
+    session = create_provider_session(SessionStore())
+    try:
+        assert set(session.download_preparers) == {XAdapter.provider}
+    finally:
+        await session.close()

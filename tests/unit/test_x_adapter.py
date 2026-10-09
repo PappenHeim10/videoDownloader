@@ -698,3 +698,79 @@ def test_an_unrecognised_message_is_never_softened_into_a_friendlier_one():
 
     assert type(failure) is XExtractionError
     assert "wat" in str(failure)
+
+
+# --- the session for the download ---------------------------------------------
+#
+# Downloading a post re-resolves it. Until `prepare_download` existed that second
+# resolution ran without the session, and every post X shows only to a signed-in
+# viewer - an age-restricted one, typically - resolved, started, and then failed
+# with "no video could be found in this tweet" (log of 2026-10-09, 05:50:32).
+
+
+class _Resolver:
+    """What `install_session` needs of a resolver: a cookie jar."""
+
+    def __init__(self) -> None:
+        from http.cookiejar import CookieJar
+
+        self.cookiejar = CookieJar()
+
+    def cookies(self) -> dict[str, str]:
+        return {cookie.name: cookie.domain for cookie in self.cookiejar}
+
+
+def test_the_resolver_that_downloads_gets_the_session_it_was_resolved_with():
+    resolver = _Resolver()
+    adapter = XAdapter(session_source=lambda: session("auth_token", "ct0"))
+
+    adapter.prepare_download(resolver)
+
+    # Both cookies, scoped to X's own domain - which is what keeps them off the
+    # CDN the media itself comes from.
+    assert resolver.cookies() == {"auth_token": ".x.com", "ct0": ".x.com"}
+
+
+def test_without_a_login_the_download_resolves_anonymously():
+    resolver = _Resolver()
+
+    XAdapter(session_source=lambda: None).prepare_download(resolver)
+    XAdapter().prepare_download(resolver)
+
+    assert resolver.cookies() == {}
+
+
+def test_half_a_session_is_not_handed_to_the_download_either():
+    """The same rule as for resolving: without `auth_token` it is not a login."""
+    resolver = _Resolver()
+
+    XAdapter(session_source=lambda: session("ct0")).prepare_download(resolver)
+
+    assert resolver.cookies() == {}
+
+
+def test_a_failing_store_costs_the_session_and_not_the_download():
+    def unreadable():
+        raise RuntimeError("the session file is unreadable")
+
+    resolver = _Resolver()
+
+    XAdapter(session_source=unreadable).prepare_download(resolver)
+
+    assert resolver.cookies() == {}
+
+
+def test_a_session_is_read_fresh_for_the_download():
+    """A login that finished after the post was resolved is used for its download."""
+    stored: list[SiteSession | None] = [None]
+    adapter = XAdapter(session_source=lambda: stored[0])
+    stored[0] = session("auth_token", "ct0")
+
+    resolver = _Resolver()
+    adapter.prepare_download(resolver)
+
+    assert set(resolver.cookies()) == {"auth_token", "ct0"}
+
+
+def test_the_media_carries_the_name_the_preparation_is_registered_under():
+    assert XAdapter.provider == "x"

@@ -44,14 +44,21 @@ attached, and the resolver reports that as "no video could be found in this
 tweet" - the same words it uses for a post of plain text. Those two are told
 apart here rather than repeated; see `_refuse_withheld`.
 
-A session, when the user has established one, is used for exactly one step: the
-resolution. It is installed into the resolver's cookie jar for that call and
-exists nowhere else - no cookie file, nothing on the media requests that follow.
-That last part is deliberate rather than an omission: the progressive files X
-publishes are ordinary CDN objects on `video.twimg.com`, and one was fetched to
-the last byte with no cookie at all on 2026-09-07. Sending an account's session
-to a CDN that does not ask for it would widen where that credential travels for
-no gain.
+A session, when the user has established one, goes to X and nowhere else. It is
+installed into the cookie jar of each resolver that talks to X about a post -
+the one that resolves it, and the one that downloads it - and exists nowhere
+else: no cookie file, nothing written. The download needs it as much as the
+resolution does: since 2026-09-13 a resolver track is fetched by re-resolving
+the post (see `ROUTE_RESOLVER_TRACKS_TO_ENGINE`), and a post X shows only to a
+signed-in viewer answers an anonymous re-resolution with "no video could be
+found" - which is what every age-restricted post did until `prepare_download`
+existed.
+
+The media requests themselves still carry no cookie, and that is deliberate
+rather than an omission: the cookies are scoped to `.x.com`, and the progressive
+files X publishes are ordinary CDN objects on `video.twimg.com`, one of which
+was fetched to the last byte with no cookie at all on 2026-09-07. The jar's own
+domain rule keeps the session off the CDN; nothing here has to.
 
 Whether a session was in play also decides which refusal a withheld post gets.
 Without one, a login is worth offering; with one, X has answered the signed-in
@@ -385,6 +392,10 @@ class XAdapter:
     credential for the life of the process.
     """
 
+    #: The name this adapter's `Media` carries, and the key its download
+    #: preparation is registered under.
+    provider = "x"
+
     def __init__(
         self,
         resolver: Any = None,
@@ -450,6 +461,22 @@ class XAdapter:
             return None
         return session
 
+    def prepare_download(self, resolver: Any) -> None:
+        """Give the resolver that downloads a post the session it was resolved with.
+
+        Downloading re-resolves the post, and X answers that the way it answered
+        the first resolution - so a post only a signed-in viewer may see needs
+        the session here too, or it comes back as "no video could be found".
+
+        The same rules as for resolving, because it is the same session: read
+        fresh, used only when complete, and a store that fails costs the
+        session rather than the download. Into this resolver's jar and no
+        further - the jar dies with the resolver.
+        """
+        session = self._session()
+        if session is not None:
+            install_session(resolver, session)
+
     async def resolve(self, url: str) -> Media:
         """Resolve a post URL into `Media` with every fetchable file."""
         post_id = _canonical_post_id(url)
@@ -498,7 +525,7 @@ class XAdapter:
             )
 
         return Media(
-            provider="x",
+            provider=self.provider,
             original_url=url,
             # X posts have no title. yt-dlp composes one from the poster's name
             # and the post text; it is kept as given, because deciding what a

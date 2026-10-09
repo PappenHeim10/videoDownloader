@@ -65,7 +65,7 @@ def watchers(monkeypatch):
         seen["probe"].append(source.url)
         return 4096
 
-    async def resolver(source, target, callback, stop_event, page_url):
+    async def resolver(source, target, callback, stop_event, page_url, prepare_resolver=None):
         seen["resolver"].append(source.url)
         target.write_bytes(b"x" * 4096)
         callback(4096, 4096)

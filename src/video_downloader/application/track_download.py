@@ -313,6 +313,7 @@ async def _download_via_resolver(
     callback: Callable[[int, int], None],
     stop_event: asyncio.Event,
     page_url: str,
+    prepare_resolver: Callable[[Any], None] | None = None,
 ) -> None:
     """Fetch one track with yt-dlp, one format selector per call.
 
@@ -366,6 +367,13 @@ async def _download_via_resolver(
 
     def run() -> None:
         with YoutubeDL(options) as downloader:
+            # Fetching re-resolves the page, and a page only a signed-in viewer
+            # may see answers this second resolution exactly as it answered the
+            # first: with nothing, unless the provider's session is in this
+            # resolver's jar too. The provider decides what that takes; this
+            # layer only gives it the resolver before it runs.
+            if prepare_resolver is not None:
+                prepare_resolver(downloader)
             downloader.download([page_url])
 
     await asyncio.to_thread(run)
@@ -381,6 +389,7 @@ async def download_selection(
     stop_event: asyncio.Event,
     report: Callable[[int, int], None],
     on_muxing: Callable[[], None] | None = None,
+    prepare_resolver: Callable[[Any], None] | None = None,
 ) -> Path | None:
     """Fetch everything the selection names and leave one file at `target`.
 
@@ -390,7 +399,9 @@ async def download_selection(
 
     `page_url` is the media's own page, needed only by the resolver path, which
     re-resolves it to get a URL that has not expired since the selection was
-    made.
+    made. `prepare_resolver` is the provider's preparation for that second
+    resolution - its session, for a page that needs one - and is handed every
+    resolver this call constructs.
 
     Returns `None` when the stop event ended it, which is the same signal the
     engine's own transport gives - a stop is a result, not an exception, and
@@ -437,7 +448,7 @@ async def download_selection(
             if is_ytdlp(fetch_source):
                 await _download_via_resolver(
                     fetch_source, track_path, progress.callback_for(role),
-                    stop_event, page_url,
+                    stop_event, page_url, prepare_resolver=prepare_resolver,
                 )
             else:
                 await _download_via_engine(

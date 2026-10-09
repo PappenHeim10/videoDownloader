@@ -82,7 +82,7 @@ def resolver_without_totals(monkeypatch):
 
     monkeypatch.setattr(track_download, "readable_total", no_total)
 
-    async def fake_resolver(source, target, callback, stop_event, page_url):
+    async def fake_resolver(source, target, callback, stop_event, page_url, prepare_resolver=None):
         target.write_bytes(b"x" * 4096)
         # Bytes ja, Gesamtwert nein - genau das, was yt-dlp hier meldet.
         callback(4096, 0)
@@ -118,7 +118,7 @@ async def test_a_completed_job_that_transferred_nothing_is_still_complete(tmp_pa
 
     monkeypatch.setattr(track_download, "readable_total", no_total)
 
-    async def silent_resolver(source, target, callback, stop_event, page_url):
+    async def silent_resolver(source, target, callback, stop_event, page_url, prepare_resolver=None):
         target.write_bytes(b"x" * 16)
         # Kein einziger Callback - der Downloader meldet gar nichts.
 

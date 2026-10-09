@@ -22,7 +22,7 @@ in `bootstrap`; see the note there.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 from base_api.models import Media
 
@@ -57,6 +57,13 @@ class ProviderSession:
 
     registry: MediaResolver
     core: MediaDownloader
+    #: Per provider name (`Media.provider`), how a resolver that *downloads*
+    #: that provider's media is prepared before it runs. A resolver track is
+    #: fetched by re-resolving its page, and a page that only a signed-in viewer
+    #: may see needs the same session for that second resolution as for the
+    #: first. The download layer looks the preparation up by name and never
+    #: learns which site it is for; a provider without one gets none.
+    download_preparers: Mapping[str, Callable[[Any], None]] = field(default_factory=dict)
     _closed: bool = field(default=False, init=False, repr=False)
 
     async def close(self) -> None:

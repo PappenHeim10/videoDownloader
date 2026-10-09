@@ -138,7 +138,7 @@ def create_provider_session(session_store: Any = None) -> ProviderSession:
     # The narrowest contract that works: the adapter is handed a way to ask for
     # its own site's session, not the store. It cannot read another site's, and
     # it asks per resolution, so a login is in effect the moment it finishes.
-    registry.register(XAdapter(
+    x_adapter = XAdapter(
         session_source=(
             partial(session_store.load, XLoginRequiredError.site)
             if session_store is not None else None
@@ -149,9 +149,15 @@ def create_provider_session(session_store: Any = None) -> ProviderSession:
             partial(session_store.clear, XLoginRequiredError.site)
             if session_store is not None else None
         ),
-    ))
+    )
+    registry.register(x_adapter)
     registry.register(DirectMediaAdapter())
-    return ProviderSession(registry=registry, core=core)
+    return ProviderSession(
+        registry=registry,
+        core=core,
+        # Downloading an X post re-resolves it, and needs the same session too.
+        download_preparers={x_adapter.provider: x_adapter.prepare_download},
+    )
 
 
 #: The sites a user can sign in to before any job asks for it. One entry per
