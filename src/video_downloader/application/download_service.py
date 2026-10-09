@@ -475,6 +475,12 @@ async def run_download_job(
                 stop_event=job.stop_event,
                 report=callback,
                 on_muxing=lambda: job.transition(LifecycleState.MUXING),
+                # Looked up by the provider that resolved the media, so the
+                # download re-resolves its page on the same terms - and a
+                # provider that registered nothing gets nothing.
+                prepare_resolver=session.download_preparers.get(
+                    getattr(media, "provider", None) or ""
+                ),
             )
             # `None` means the stop event ended it - the same signal the engine
             # gives with `False`, and handled by the same code.
